@@ -626,7 +626,48 @@ static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, Expression
     }
 }
 
+// Test function to verify WKB parsing: raquet_parse_wkb_point(wkb BLOB) -> STRUCT(lon DOUBLE, lat DOUBLE)
+// This helps test GEOMETRY integration without requiring the spatial extension
+static void RaquetParseWkbPointFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+
+    auto wkb_data = FlatVector::GetData<string_t>(args.data[0]);
+    auto &wkb_validity = FlatVector::Validity(args.data[0]);
+
+    auto &struct_entries = StructVector::GetEntries(result);
+    auto lon_data = FlatVector::GetData<double>(*struct_entries[0]);
+    auto lat_data = FlatVector::GetData<double>(*struct_entries[1]);
+    auto &result_validity = FlatVector::Validity(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        if (!wkb_validity.RowIsValid(i)) {
+            result_validity.SetInvalid(i);
+            continue;
+        }
+
+        double lon, lat;
+        if (ExtractPointCoordinates(wkb_data[i], lon, lat)) {
+            lon_data[i] = lon;
+            lat_data[i] = lat;
+        } else {
+            result_validity.SetInvalid(i);
+        }
+    }
+
+    result.SetVectorType(VectorType::FLAT_VECTOR);
+}
+
 void RegisterRasterValueFunctions(ExtensionLoader &loader) {
+    // raquet_parse_wkb_point(wkb) -> STRUCT(lon, lat) - for testing WKB parsing
+    child_list_t<LogicalType> point_struct;
+    point_struct.push_back(make_pair("lon", LogicalType::DOUBLE));
+    point_struct.push_back(make_pair("lat", LogicalType::DOUBLE));
+    ScalarFunction parse_wkb_fn("raquet_parse_wkb_point",
+        {LogicalType::BLOB},
+        LogicalType::STRUCT(point_struct),
+        RaquetParseWkbPointFunction);
+    loader.RegisterFunction(parse_wkb_fn);
+
     // raquet_pixel(band, dtype, x, y, width, compression) -> DOUBLE
     ScalarFunction pixel_fn("raquet_pixel",
         {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::INTEGER,
