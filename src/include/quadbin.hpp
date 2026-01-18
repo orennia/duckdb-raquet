@@ -171,6 +171,118 @@ inline void tile_to_bbox_wgs84(int x, int y, int z,
     max_lat = max_lat_rad * 180.0 / PI;
 }
 
+// Get parent cell at lower resolution
+inline uint64_t cell_to_parent(uint64_t cell, int parent_resolution) {
+    int current_res = cell_to_resolution(cell);
+    if (parent_resolution < 0 || parent_resolution > current_res) {
+        throw std::invalid_argument("Parent resolution must be between 0 and current resolution");
+    }
+    if (parent_resolution == current_res) {
+        return cell;
+    }
+
+    // Get tile coordinates and convert to parent resolution
+    int x, y, z;
+    cell_to_tile(cell, x, y, z);
+
+    // Shift to parent resolution
+    int shift = z - parent_resolution;
+    int parent_x = x >> shift;
+    int parent_y = y >> shift;
+
+    return tile_to_cell(parent_x, parent_y, parent_resolution);
+}
+
+// Get parent cell at resolution - 1
+inline uint64_t cell_to_parent(uint64_t cell) {
+    int current_res = cell_to_resolution(cell);
+    if (current_res == 0) {
+        return cell; // Already at root
+    }
+    return cell_to_parent(cell, current_res - 1);
+}
+
+// Get children cells at higher resolution (returns 4 children)
+inline void cell_to_children(uint64_t cell, int child_resolution,
+                             uint64_t* children, int& count) {
+    int current_res = cell_to_resolution(cell);
+    if (child_resolution <= current_res || child_resolution > MAX_RESOLUTION) {
+        throw std::invalid_argument("Child resolution must be greater than current and <= 26");
+    }
+
+    int x, y, z;
+    cell_to_tile(cell, x, y, z);
+
+    // Calculate number of children in each dimension
+    int res_diff = child_resolution - current_res;
+    int children_per_dim = 1 << res_diff;  // 2^res_diff
+    count = children_per_dim * children_per_dim;
+
+    // Base coordinates at child resolution
+    int base_x = x << res_diff;
+    int base_y = y << res_diff;
+
+    // Generate all children
+    int idx = 0;
+    for (int dy = 0; dy < children_per_dim; dy++) {
+        for (int dx = 0; dx < children_per_dim; dx++) {
+            children[idx++] = tile_to_cell(base_x + dx, base_y + dy, child_resolution);
+        }
+    }
+}
+
+// Get immediate children (4 cells at resolution + 1)
+inline void cell_to_children(uint64_t cell, uint64_t children[4]) {
+    int dummy_count;
+    cell_to_children(cell, cell_to_resolution(cell) + 1, children, dummy_count);
+}
+
+// Get k-ring neighbors (cells within distance k)
+// Returns cells in a grid pattern around the center cell
+inline void cell_kring(uint64_t cell, int k, uint64_t* neighbors, int& count) {
+    if (k < 0) {
+        throw std::invalid_argument("K must be non-negative");
+    }
+
+    int x, y, z;
+    cell_to_tile(cell, x, y, z);
+
+    int max_coord = (1 << z) - 1;  // Maximum valid coordinate at this resolution
+    int diameter = 2 * k + 1;
+
+    count = 0;
+    for (int dy = -k; dy <= k; dy++) {
+        for (int dx = -k; dx <= k; dx++) {
+            int nx = x + dx;
+            int ny = y + dy;
+
+            // Skip cells outside valid range (handles edge wrapping)
+            if (nx < 0 || nx > max_coord || ny < 0 || ny > max_coord) {
+                continue;
+            }
+
+            neighbors[count++] = tile_to_cell(nx, ny, z);
+        }
+    }
+}
+
+// Get sibling cells (other children of the same parent)
+inline void cell_siblings(uint64_t cell, uint64_t siblings[4]) {
+    int z = cell_to_resolution(cell);
+    if (z == 0) {
+        // Root cell has no siblings
+        siblings[0] = cell;
+        siblings[1] = cell;
+        siblings[2] = cell;
+        siblings[3] = cell;
+        return;
+    }
+
+    // Get parent and then its children
+    uint64_t parent = cell_to_parent(cell);
+    cell_to_children(parent, siblings);
+}
+
 // Calculate pixel coordinates within a tile for a given lon/lat
 inline void lonlat_to_pixel(double lon, double lat, int z, int tile_size,
                             int &pixel_x, int &pixel_y, int &tile_x, int &tile_y) {

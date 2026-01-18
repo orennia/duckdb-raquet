@@ -22,6 +22,7 @@ set(EXTENSION_SOURCES
     src/raster/st_raster_value.cpp
     src/raster/st_raster_stats.cpp
     src/metadata/raquet_metadata.cpp
+    src/table_functions/raquet_table_functions.cpp
 )
 
 # Find zlib for gzip decompression

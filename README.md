@@ -1,95 +1,248 @@
 # DuckDB Raquet Extension
 
-A DuckDB extension for working with [Raquet](https://github.com/CartoDB/raquet) raster data stored in Parquet format.
+A DuckDB extension for working with [Raquet](https://github.com/CartoDB/raquet) raster data stored in Apache Parquet format with QUADBIN spatial indexing.
 
-## Overview
+## What is Raquet?
 
-Raquet is a specification for storing raster data in Apache Parquet with QUADBIN spatial indexing. This extension provides:
+**Raquet** is a specification created by [CARTO](https://carto.com) for storing raster data efficiently using:
 
-- **QUADBIN functions** for spatial indexing (tile ↔ cell ↔ lon/lat conversions)
-- **Raster value extraction** (PostGIS-like `ST_RasterValue`)
-- **Summary statistics** (PostGIS-like `ST_RasterSummaryStats`)
-- **Band data decoding** for binary pixel data
+- **Apache Parquet** - Columnar storage for efficient compression and query performance
+- **QUADBIN** - A spatial indexing scheme encoding Web Mercator tile coordinates into 64-bit integers
+- **Binary Band Data** - Pixel values stored as compressed BLOBs (gzip or uncompressed)
+
+This extension enables DuckDB to query Raquet files directly using SQL, with functions for spatial indexing, pixel extraction, and raster analytics.
+
+## Features
+
+- **QUADBIN Functions** - Convert between tiles, cells, and geographic coordinates
+- **Raster Value Extraction** - PostGIS-style `ST_RasterValue` for pixel lookups
+- **Summary Statistics** - Calculate min/max/mean/stddev for raster tiles
+- **Band Decoding** - Decompress and read binary raster data
+- **Spatial Filtering** - Point-in-tile and bbox intersection tests
+- **DuckDB Spatial Integration** - Works with GEOMETRY types from DuckDB Spatial
 
 ## Installation
 
+### From Community Extensions (Coming Soon)
+
 ```sql
--- When published to community extensions:
 INSTALL raquet FROM community;
 LOAD raquet;
 ```
 
-## Usage
+### Building from Source
 
-### Reading Raquet Files
+**Prerequisites:**
+- CMake 3.12+
+- C++17 compatible compiler
+- zlib (for gzip decompression)
 
-Raquet files are standard Parquet files, so you can read them directly:
+```bash
+# Clone the repository
+git clone https://github.com/CartoDB/duckdb-raquet.git
+cd duckdb-raquet
+
+# Initialize DuckDB submodule
+git submodule update --init --recursive
+
+# Build release version
+make release
+
+# Run tests
+make test
+```
+
+**Build Targets:**
+- `make release` - Build optimized release version
+- `make debug` - Build with debug symbols
+- `make test` - Run basic functionality test
+- `make test_sql` - Run SQL test suite
+- `make clean` - Clean build artifacts
+- `make format` - Run clang-format on source files
+
+## Quick Start
 
 ```sql
--- Read from file
+-- Load the extension
+LOAD raquet;
+
+-- Read a Raquet file (it's just Parquet!)
 SELECT * FROM read_parquet('raster.parquet') WHERE block != 0 LIMIT 10;
 
--- Or create a table
-CREATE TABLE dem AS SELECT * FROM read_parquet('elevation.parquet');
+-- Get pixel value at a location
+SELECT ST_RasterValue(
+    block,            -- QUADBIN cell ID
+    band_1,           -- Binary band data
+    -73.9857,         -- Longitude
+    40.7484,          -- Latitude
+    'int16',          -- Data type
+    256,              -- Tile size
+    'gzip'            -- Compression
+) AS elevation
+FROM read_parquet('dem.parquet')
+WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
 ```
+
+## Function Reference
 
 ### QUADBIN Functions
 
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `quadbin_from_tile(x, y, z)` | Convert tile coordinates to QUADBIN cell | `UBIGINT` |
+| `quadbin_to_tile(cell)` | Convert QUADBIN cell to tile coordinates | `STRUCT(x, y, z)` |
+| `quadbin_from_lonlat(lon, lat, resolution)` | Convert lon/lat to QUADBIN cell | `UBIGINT` |
+| `quadbin_to_lonlat(cell)` | Get center lon/lat of QUADBIN cell | `STRUCT(lon, lat)` |
+| `quadbin_resolution(cell)` | Get resolution level (zoom) from cell | `INTEGER` |
+| `quadbin_to_bbox(cell)` | Get bounding box of cell | `STRUCT(min_lon, min_lat, max_lon, max_lat)` |
+| `quadbin_pixel_xy(lon, lat, res, tile_size)` | Get pixel coordinates within tile | `STRUCT(pixel_x, pixel_y)` |
+| `quadbin_cell_for_point(lon, lat, res)` | Alias for quadbin_from_lonlat | `UBIGINT` |
+
+### Spatial Filtering Functions
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `quadbin_contains(cell, lon, lat)` | Check if point is within tile | `BOOLEAN` |
+| `quadbin_intersects_bbox(cell, min_lon, min_lat, max_lon, max_lat)` | Check if tile intersects bbox | `BOOLEAN` |
+
+### Hierarchical Functions
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `quadbin_to_parent(cell)` | Get parent cell at resolution - 1 | `UBIGINT` |
+| `quadbin_to_parent(cell, resolution)` | Get parent cell at specified resolution | `UBIGINT` |
+| `quadbin_to_children(cell)` | Get 4 children cells at resolution + 1 | `LIST(UBIGINT)` |
+| `quadbin_to_children(cell, resolution)` | Get all children at specified resolution | `LIST(UBIGINT)` |
+| `quadbin_sibling(cell)` | Get sibling cells (same parent) | `LIST(UBIGINT)` |
+| `quadbin_kring(cell, k)` | Get cells within k distance | `LIST(UBIGINT)` |
+
+### Spatial Format Functions
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `quadbin_to_wkt(cell)` | Convert cell to WKT POLYGON | `VARCHAR` |
+| `quadbin_to_geojson(cell)` | Convert cell to GeoJSON | `VARCHAR` |
+| `quadbin_boundary(cell)` | Alias for quadbin_to_wkt | `VARCHAR` |
+
+### Raster Functions
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `raquet_pixel(band, dtype, x, y, width, compression)` | Get pixel value at x,y | `DOUBLE` |
+| `raquet_pixel(band, metadata, x, y)` | Get pixel using metadata | `DOUBLE` |
+| `ST_RasterValue(block, band, lon, lat, dtype, width, compression)` | Get pixel at lon/lat | `DOUBLE` |
+| `ST_RasterValue(block, band, lon, lat, metadata)` | Get pixel using metadata | `DOUBLE` |
+| `ST_RasterValue(block, band, lon, lat, metadata, band_idx)` | Get specific band pixel | `DOUBLE` |
+| `ST_RasterValue(block, band, point_geom, metadata)` | Get pixel using GEOMETRY | `DOUBLE` |
+| `raquet_decode_band(band, dtype, width, height, compression)` | Decode entire band | `DOUBLE[]` |
+| `ST_RasterSummaryStats(band, dtype, w, h, compression)` | Get tile statistics | `STRUCT(...)` |
+| `ST_RasterSummaryStats(band, dtype, w, h, compression, nodata)` | Stats with nodata filter | `STRUCT(...)` |
+
+### Metadata Functions
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `raquet_is_metadata_row(block)` | Check if block = 0 (metadata) | `BOOLEAN` |
+| `raquet_is_data_row(block)` | Check if block != 0 (data) | `BOOLEAN` |
+| `raquet_parse_metadata(json)` | Parse metadata JSON | `STRUCT(...)` |
+| `raquet_band_type(metadata, band_idx)` | Get band data type | `VARCHAR` |
+| `raquet_compression(metadata)` | Get compression type | `VARCHAR` |
+| `raquet_block_size(metadata)` | Get tile size | `INTEGER` |
+
+## Supported Data Types
+
+| Type | Description |
+|------|-------------|
+| `uint8` | Unsigned 8-bit integer (0-255) |
+| `int8` | Signed 8-bit integer |
+| `uint16` | Unsigned 16-bit integer |
+| `int16` | Signed 16-bit integer |
+| `uint32` | Unsigned 32-bit integer |
+| `int32` | Signed 32-bit integer |
+| `uint64` | Unsigned 64-bit integer |
+| `int64` | Signed 64-bit integer |
+| `float32` | 32-bit floating point |
+| `float64` | 64-bit floating point |
+
+## Usage Examples
+
+### Reading Raquet Files
+
 ```sql
--- Convert tile coordinates to QUADBIN cell
-SELECT quadbin_from_tile(4096, 2048, 13);  -- Returns UBIGINT
+-- Raquet files are standard Parquet, read directly
+SELECT * FROM read_parquet('elevation.parquet') LIMIT 10;
 
--- Convert QUADBIN cell back to tile coordinates
-SELECT (quadbin_to_tile(5234261499580514304)).*;  -- Returns {x, y, z}
+-- Filter data rows (exclude metadata row where block = 0)
+SELECT * FROM read_parquet('elevation.parquet') WHERE block != 0;
 
--- Convert lon/lat to QUADBIN cell at resolution
+-- Get metadata row
+SELECT metadata FROM read_parquet('elevation.parquet') WHERE block = 0;
+```
+
+### QUADBIN Spatial Indexing
+
+```sql
+-- Convert tile coordinates (x=4096, y=2048, zoom=13) to QUADBIN
+SELECT quadbin_from_tile(4096, 2048, 13);
+-- Result: 5234261499580514304
+
+-- Convert back to tile coordinates
+SELECT (quadbin_to_tile(5234261499580514304)).*;
+-- Result: {x: 4096, y: 2048, z: 13}
+
+-- Get QUADBIN cell for New York City at zoom 13
 SELECT quadbin_from_lonlat(-73.9857, 40.7484, 13);
 
--- Get center lon/lat of a QUADBIN cell
-SELECT (quadbin_to_lonlat(5234261499580514304)).*;  -- Returns {lon, lat}
+-- Get center coordinates of a cell
+SELECT (quadbin_to_lonlat(5234261499580514304)).*;
 
--- Get resolution from QUADBIN cell
-SELECT quadbin_resolution(5234261499580514304);  -- Returns 13
+-- Get bounding box of a cell
+SELECT (quadbin_to_bbox(5234261499580514304)).*;
 
--- Get bounding box of QUADBIN cell
-SELECT (quadbin_to_bbox(5234261499580514304)).*;  -- Returns {min_lon, min_lat, max_lon, max_lat}
-
--- Get pixel coordinates within tile for a lon/lat
-SELECT (quadbin_pixel_xy(-73.9857, 40.7484, 13, 256)).*;  -- Returns {pixel_x, pixel_y}
+-- Get resolution/zoom level
+SELECT quadbin_resolution(5234261499580514304);
+-- Result: 13
 ```
 
 ### Extracting Raster Values
 
 ```sql
--- Get pixel value at specific x,y within a tile
+-- Get pixel value at specific coordinates
 SELECT raquet_pixel(
-    band_1,           -- BLOB: band data
-    'int16',          -- VARCHAR: data type
-    128,              -- INT: pixel x
-    128,              -- INT: pixel y
-    256,              -- INT: tile width
-    'gzip'            -- VARCHAR: compression ('gzip' or 'none')
+    band_1,           -- Band data (BLOB)
+    'int16',          -- Data type
+    128,              -- Pixel X
+    128,              -- Pixel Y
+    256,              -- Tile width
+    'gzip'            -- Compression
 ) FROM dem WHERE block = 5234261499580514304;
 
--- Get pixel value at lon/lat (PostGIS-style)
+-- Get elevation at a geographic location
 SELECT ST_RasterValue(
-    block,            -- UBIGINT: quadbin cell
-    band_1,           -- BLOB: band data
-    -73.9857,         -- DOUBLE: longitude
-    40.7484,          -- DOUBLE: latitude
-    'int16',          -- VARCHAR: data type
-    256,              -- INT: tile size
-    'gzip'            -- VARCHAR: compression
-) FROM dem WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
+    block,
+    band_1,
+    -73.9857,         -- Longitude
+    40.7484,          -- Latitude
+    'int16',
+    256,
+    'gzip'
+) AS elevation
+FROM dem
+WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
 ```
 
-### Joining Points with Raster
+### Point-Raster Joins
 
 ```sql
--- Get elevation at point locations
+-- Get elevation for a table of points
 SELECT
     p.id,
-    ST_RasterValue(r.block, r.band_1, ST_X(p.geom), ST_Y(p.geom), 'int16', 256, 'gzip') as elevation
+    p.name,
+    ST_RasterValue(
+        r.block, r.band_1,
+        ST_X(p.geom), ST_Y(p.geom),
+        'int16', 256, 'gzip'
+    ) AS elevation
 FROM points p
 JOIN dem r ON quadbin_from_lonlat(ST_X(p.geom), ST_Y(p.geom), 13) = r.block
 WHERE r.block != 0;
@@ -98,15 +251,16 @@ WHERE r.block != 0;
 ### Summary Statistics
 
 ```sql
--- Get statistics for a tile
+-- Get statistics for each tile
 SELECT
     block,
     (ST_RasterSummaryStats(band_1, 'int16', 256, 256, 'gzip')).*
 FROM dem
 WHERE block != 0
 LIMIT 5;
+-- Returns: count, sum, mean, min, max, stddev
 
--- With nodata value filtering
+-- Filter out nodata values
 SELECT
     block,
     (ST_RasterSummaryStats(band_1, 'int16', 256, 256, 'gzip', -9999)).*
@@ -114,109 +268,75 @@ FROM dem
 WHERE block != 0;
 ```
 
-### Decoding Full Bands
+### Spatial Filtering
 
 ```sql
--- Decode entire band to array (useful for analysis)
-SELECT
-    block,
-    raquet_decode_band(band_1, 'int16', 256, 256, 'gzip') as pixels
+-- Find tiles that contain a specific point
+SELECT block
 FROM dem
-WHERE block != 0
-LIMIT 1;
-```
+WHERE quadbin_contains(block, -73.9857, 40.7484)
+  AND block != 0;
 
-### Working with Metadata
-
-```sql
--- Get the metadata row (block = 0)
-SELECT metadata
-FROM read_parquet('raster.parquet')
-WHERE block = 0;
-
--- Helper functions
-SELECT raquet_is_metadata_row(block), raquet_is_data_row(block)
+-- Find tiles intersecting a bounding box
+SELECT block
 FROM dem
-LIMIT 5;
+WHERE quadbin_intersects_bbox(block, -74.1, 40.6, -73.8, 40.9)
+  AND block != 0;
 ```
 
-## Function Reference
-
-### QUADBIN Functions
-
-| Function | Description |
-|----------|-------------|
-| `quadbin_from_tile(x, y, z)` | Convert tile coordinates to QUADBIN cell |
-| `quadbin_to_tile(cell)` | Convert QUADBIN cell to tile coordinates |
-| `quadbin_from_lonlat(lon, lat, resolution)` | Convert lon/lat to QUADBIN cell |
-| `quadbin_to_lonlat(cell)` | Get center lon/lat of QUADBIN cell |
-| `quadbin_resolution(cell)` | Get resolution level from QUADBIN cell |
-| `quadbin_to_bbox(cell)` | Get bounding box of QUADBIN cell |
-| `quadbin_pixel_xy(lon, lat, resolution, tile_size)` | Get pixel coordinates within tile |
-
-### Raster Functions
-
-| Function | Description |
-|----------|-------------|
-| `raquet_pixel(band, dtype, x, y, width, compression)` | Get pixel value at x,y |
-| `ST_RasterValue(block, band, lon, lat, dtype, width, compression)` | Get pixel value at lon/lat |
-| `ST_RasterSummaryStats(band, dtype, width, height, compression[, nodata])` | Get tile statistics |
-| `raquet_decode_band(band, dtype, width, height, compression)` | Decode band to array |
-
-### Metadata Functions
-
-| Function | Description |
-|----------|-------------|
-| `raquet_is_metadata_row(block)` | Check if row is metadata (block = 0) |
-| `raquet_is_data_row(block)` | Check if row is data (block != 0) |
-
-## Supported Data Types
-
-- `uint8`, `int8`
-- `uint16`, `int16`
-- `uint32`, `int32`
-- `uint64`, `int64`
-- `float32`, `float64`
-
-## Building from Source
-
-```bash
-# Clone the repository
-git clone https://github.com/CartoDB/duckdb-raquet.git
-cd duckdb-raquet
-
-# Initialize submodules (DuckDB)
-git submodule update --init --recursive
-
-# Build
-make release
-
-# Run tests
-make test
-```
-
-## Integration with DuckDB Spatial
-
-This extension works seamlessly with the DuckDB spatial extension:
+### DuckDB Spatial Integration
 
 ```sql
 LOAD spatial;
 LOAD raquet;
 
--- Create points table with geometry
-CREATE TABLE points AS
-SELECT 1 as id, ST_Point(-73.9857, 40.7484) as geom
-UNION ALL
-SELECT 2, ST_Point(-122.4194, 37.7749);
-
--- Join with raquet raster
+-- Convert QUADBIN cell to geometry for spatial operations
 SELECT
-    p.id,
-    ST_RasterValue(r.block, r.band_1, ST_X(p.geom), ST_Y(p.geom), 'int16', 256, 'gzip') as value
-FROM points p
-JOIN dem r ON quadbin_from_lonlat(ST_X(p.geom), ST_Y(p.geom), 13) = r.block
-WHERE r.block != 0;
+    block,
+    ST_GeomFromText(quadbin_to_wkt(block)) AS geom
+FROM dem
+WHERE block != 0
+LIMIT 5;
+
+-- Get elevation using GEOMETRY point
+SELECT ST_RasterValue(
+    r.block,
+    r.band_1,
+    ST_Point(-73.9857, 40.7484),
+    metadata
+) AS elevation
+FROM dem r
+WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
 ```
+
+## Raquet File Format
+
+A Raquet file is a Parquet file with specific conventions:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `block` | `UBIGINT` | QUADBIN cell ID (0 for metadata row) |
+| `band_1`, `band_2`, ... | `BLOB` | Compressed pixel data |
+| `metadata` | `VARCHAR` | JSON metadata (only in row where block=0) |
+
+**Metadata JSON Structure:**
+```json
+{
+  "compression": "gzip",
+  "block_width": 256,
+  "block_height": 256,
+  "minresolution": 0,
+  "maxresolution": 15,
+  "bands": [
+    {"name": "elevation", "type": "int16", "nodata": -9999}
+  ]
+}
+```
+
+## Dependencies
+
+- **DuckDB** - Core database engine (included as submodule)
+- **zlib** - For gzip decompression (system dependency)
 
 ## License
 
@@ -225,5 +345,65 @@ Apache 2.0
 ## Related Projects
 
 - [Raquet Specification](https://github.com/CartoDB/raquet) - The Raquet format specification
+- [DuckDB](https://duckdb.org) - Fast in-process analytical database
 - [DuckDB Spatial](https://github.com/duckdb/duckdb-spatial) - Spatial extension for DuckDB
-- [CARTO Analytics Toolbox](https://docs.carto.com/data-and-analysis/analytics-toolbox-for-bigquery/sql-reference/raster) - Raster functions for data warehouses
+- [CARTO Analytics Toolbox](https://docs.carto.com/data-and-analysis/analytics-toolbox-for-bigquery/sql-reference/raster) - Raster functions for cloud data warehouses
+
+## Contributing
+
+Contributions are welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Ensure all tests pass (`make test_sql`)
+5. Submit a pull request
+
+## Sample Data
+
+CARTO provides sample Raquet files for testing:
+
+| File | Description | Size | URL |
+|------|-------------|------|-----|
+| `riyadh.parquet` | Satellite imagery of Riyadh (3 bands, uint16) | 809 MB | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/riyadh.parquet) |
+| `naip_test.parquet` | NAIP aerial imagery, NY area (3 bands, uint8) | 380 MB | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet) |
+| `europe.parquet` | European coverage | - | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/europe.parquet) |
+
+**Quick test with sample data:**
+
+```sql
+-- With httpfs extension for remote access
+INSTALL httpfs;
+LOAD httpfs;
+LOAD raquet;
+
+-- Query Riyadh satellite data
+SELECT
+    block,
+    quadbin_resolution(block) as zoom,
+    (quadbin_to_bbox(block)).*
+FROM read_parquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/riyadh.parquet')
+WHERE block != 0
+LIMIT 5;
+
+-- Get pixel value from NAIP imagery
+SELECT ST_RasterValue(
+    block, band_1, -73.22, 40.91, 'uint8', 256, 'gzip'
+) as red_value
+FROM read_parquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet')
+WHERE block = quadbin_from_lonlat(-73.22, 40.91, 18);
+```
+
+## Roadmap
+
+**Implemented:**
+- [x] `quadbin_to_parent()` - Get parent cell at lower resolution
+- [x] `quadbin_to_children()` - Get child cells at higher resolution
+- [x] `quadbin_kring()` - Get neighboring cells
+- [x] `quadbin_sibling()` - Get sibling cells
+
+**Planned:**
+- [ ] `quadbin_polyfill()` - Fill polygon with cells
+- [ ] `read_raquet()` - Dedicated table function with automatic metadata handling
+- [ ] Performance optimizations for batch pixel extraction
+- [ ] Streaming support for large raster files

@@ -1,0 +1,198 @@
+# name: test/sql/raster.test
+# description: Test raster functions with sample data
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test raquet_pixel function
+# =============================================================================
+
+# Test basic pixel extraction with manually created test data
+# Create a simple 4x4 uint8 tile (uncompressed)
+statement ok
+CREATE TABLE test_tile AS
+SELECT
+    5234261499580514304::UBIGINT as block,
+    -- 4x4 grid with values 1-16
+    '\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F\x10'::BLOB as band_1
+
+# Test pixel at (0,0) - should be 1
+query I
+SELECT raquet_pixel(band_1, 'uint8', 0, 0, 4, 'none') FROM test_tile
+----
+1.0
+
+# Test pixel at (1,0) - should be 2
+query I
+SELECT raquet_pixel(band_1, 'uint8', 1, 0, 4, 'none') FROM test_tile
+----
+2.0
+
+# Test pixel at (3,3) - should be 16
+query I
+SELECT raquet_pixel(band_1, 'uint8', 3, 3, 4, 'none') FROM test_tile
+----
+16.0
+
+# Test pixel at (2,1) - row 1, col 2 = 1*4+2+1 = 7
+query I
+SELECT raquet_pixel(band_1, 'uint8', 2, 1, 4, 'none') FROM test_tile
+----
+7.0
+
+statement ok
+DROP TABLE test_tile
+
+# =============================================================================
+# Test with different data types
+# =============================================================================
+
+# Test int16 data type
+statement ok
+CREATE TABLE test_int16 AS
+SELECT
+    1::UBIGINT as block,
+    -- 2x2 grid: [100, 200, -100, -200] as int16 (little-endian)
+    '\x64\x00\xC8\x00\x9C\xFF\x38\xFF'::BLOB as band_1
+
+query I
+SELECT raquet_pixel(band_1, 'int16', 0, 0, 2, 'none') FROM test_int16
+----
+100.0
+
+query I
+SELECT raquet_pixel(band_1, 'int16', 1, 0, 2, 'none') FROM test_int16
+----
+200.0
+
+query I
+SELECT raquet_pixel(band_1, 'int16', 0, 1, 2, 'none') FROM test_int16
+----
+-100.0
+
+query I
+SELECT raquet_pixel(band_1, 'int16', 1, 1, 2, 'none') FROM test_int16
+----
+-200.0
+
+statement ok
+DROP TABLE test_int16
+
+# =============================================================================
+# Test float32 data type
+# =============================================================================
+
+statement ok
+CREATE TABLE test_float32 AS
+SELECT
+    1::UBIGINT as block,
+    -- Single float32 value: 3.14159
+    '\xD0\x0F\x49\x40'::BLOB as band_1
+
+query I
+SELECT round(raquet_pixel(band_1, 'float32', 0, 0, 1, 'none'), 4) FROM test_float32
+----
+3.1416
+
+statement ok
+DROP TABLE test_float32
+
+# =============================================================================
+# Test raquet_decode_band
+# =============================================================================
+
+statement ok
+CREATE TABLE test_decode AS
+SELECT
+    1::UBIGINT as block,
+    '\x01\x02\x03\x04'::BLOB as band_1
+
+query I
+SELECT length(raquet_decode_band(band_1, 'uint8', 2, 2, 'none')) FROM test_decode
+----
+4
+
+statement ok
+DROP TABLE test_decode
+
+# =============================================================================
+# Test metadata helper functions
+# =============================================================================
+
+# Test raquet_is_metadata_row
+query I
+SELECT raquet_is_metadata_row(0::UBIGINT)
+----
+true
+
+query I
+SELECT raquet_is_metadata_row(123::UBIGINT)
+----
+false
+
+query I
+SELECT raquet_is_metadata_row(5234261499580514304::UBIGINT)
+----
+false
+
+# Test raquet_is_data_row
+query I
+SELECT raquet_is_data_row(0::UBIGINT)
+----
+false
+
+query I
+SELECT raquet_is_data_row(123::UBIGINT)
+----
+true
+
+query I
+SELECT raquet_is_data_row(5234261499580514304::UBIGINT)
+----
+true
+
+# =============================================================================
+# Test ST_RasterSummaryStats structure
+# =============================================================================
+
+statement ok
+CREATE TABLE test_stats AS
+SELECT
+    1::UBIGINT as block,
+    -- 4 uint8 values: 10, 20, 30, 40
+    '\x0A\x14\x1E\x28'::BLOB as band_1
+
+query IIIIII
+SELECT
+    (ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).count,
+    (ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).sum,
+    (ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).mean,
+    (ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).min,
+    (ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).max,
+    round((ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).stddev, 4)
+FROM test_stats
+----
+4	100.0	25.0	10.0	40.0	12.9099
+
+statement ok
+DROP TABLE test_stats
+
+# =============================================================================
+# Test null handling
+# =============================================================================
+
+query I
+SELECT raquet_pixel(NULL, 'uint8', 0, 0, 4, 'none')
+----
+NULL
+
+query I
+SELECT raquet_is_metadata_row(NULL)
+----
+NULL
+
+query I
+SELECT raquet_is_data_row(NULL)
+----
+NULL

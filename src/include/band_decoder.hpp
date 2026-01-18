@@ -125,5 +125,24 @@ std::vector<double> decode_band(const uint8_t *band_data, size_t band_size,
                                  int width, int height,
                                  bool compressed);
 
+// Statistics result structure
+struct BandStats {
+    int64_t count = 0;
+    double sum = 0.0;
+    double mean = 0.0;
+    double min = 0.0;
+    double max = 0.0;
+    double stddev = 0.0;
+};
+
+// Compute statistics directly from band data without allocating full pixel array
+// This is more memory efficient for large tiles
+BandStats compute_band_stats(const uint8_t *band_data, size_t band_size,
+                              const std::string &dtype_str,
+                              int width, int height,
+                              bool compressed,
+                              bool has_nodata = false,
+                              double nodata = 0.0);
+
 } // namespace raquet
 } // namespace duckdb

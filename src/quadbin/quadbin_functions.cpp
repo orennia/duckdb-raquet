@@ -4,6 +4,9 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "quadbin.hpp"
+#include <sstream>
+#include <iomanip>
+#include <vector>
 
 namespace duckdb {
 
@@ -238,6 +241,249 @@ static void QuadbinCellForPointFunction(DataChunk &args, ExpressionState &state,
         });
 }
 
+// ============================================================================
+// Spatial Format Functions (for DuckDB Spatial compatibility)
+// ============================================================================
+
+// Helper function to convert quadbin cell to WKT polygon
+static std::string cell_to_wkt(uint64_t cell) {
+    int x, y, z;
+    quadbin::cell_to_tile(cell, x, y, z);
+
+    double min_lon, min_lat, max_lon, max_lat;
+    quadbin::tile_to_bbox_wgs84(x, y, z, min_lon, min_lat, max_lon, max_lat);
+
+    std::ostringstream ss;
+    ss << std::setprecision(15);
+    ss << "POLYGON(("
+       << min_lon << " " << min_lat << ", "
+       << max_lon << " " << min_lat << ", "
+       << max_lon << " " << max_lat << ", "
+       << min_lon << " " << max_lat << ", "
+       << min_lon << " " << min_lat << "))";
+
+    return ss.str();
+}
+
+// Helper function to convert quadbin cell to GeoJSON
+static std::string cell_to_geojson(uint64_t cell) {
+    int x, y, z;
+    quadbin::cell_to_tile(cell, x, y, z);
+
+    double min_lon, min_lat, max_lon, max_lat;
+    quadbin::tile_to_bbox_wgs84(x, y, z, min_lon, min_lat, max_lon, max_lat);
+
+    std::ostringstream ss;
+    ss << std::setprecision(15);
+    ss << R"({"type":"Polygon","coordinates":[[[)"
+       << min_lon << "," << min_lat << "],["
+       << max_lon << "," << min_lat << "],["
+       << max_lon << "," << max_lat << "],["
+       << min_lon << "," << max_lat << "],["
+       << min_lon << "," << min_lat << "]]]}";
+
+    return ss.str();
+}
+
+// quadbin_to_wkt(cell) -> VARCHAR
+// Convert a quadbin cell to WKT POLYGON for use with ST_GeomFromText
+static void QuadbinToWktFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+
+    UnaryExecutor::Execute<uint64_t, string_t>(cell_vec, result, args.size(),
+        [&](uint64_t cell) {
+            auto wkt = cell_to_wkt(cell);
+            return StringVector::AddString(result, wkt);
+        });
+}
+
+// quadbin_to_geojson(cell) -> VARCHAR
+// Convert a quadbin cell to GeoJSON for use with ST_GeomFromGeoJSON
+static void QuadbinToGeojsonFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+
+    UnaryExecutor::Execute<uint64_t, string_t>(cell_vec, result, args.size(),
+        [&](uint64_t cell) {
+            auto json = cell_to_geojson(cell);
+            return StringVector::AddString(result, json);
+        });
+}
+
+// quadbin_boundary(cell) -> VARCHAR (alias for quadbin_to_wkt)
+// Returns WKT representation - named for PostGIS compatibility
+static void QuadbinBoundaryFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    QuadbinToWktFunction(args, state, result);
+}
+
+// ============================================================================
+// Hierarchical Functions (parent, children, siblings, kring)
+// ============================================================================
+
+// quadbin_to_parent(cell) -> UBIGINT
+// Get parent cell at resolution - 1
+static void QuadbinToParentFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+
+    UnaryExecutor::Execute<uint64_t, uint64_t>(cell_vec, result, args.size(),
+        [](uint64_t cell) {
+            return quadbin::cell_to_parent(cell);
+        });
+}
+
+// quadbin_to_parent(cell, resolution) -> UBIGINT
+// Get parent cell at specified resolution
+static void QuadbinToParentResFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+    auto &res_vec = args.data[1];
+
+    BinaryExecutor::Execute<uint64_t, int32_t, uint64_t>(cell_vec, res_vec, result, args.size(),
+        [](uint64_t cell, int32_t resolution) {
+            return quadbin::cell_to_parent(cell, resolution);
+        });
+}
+
+// quadbin_to_children(cell) -> LIST(UBIGINT)
+// Get 4 children cells at resolution + 1
+static void QuadbinToChildrenFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+    auto list_size = args.size();
+
+    // Result is a list of UBIGINT
+    auto &list_entries = ListVector::GetEntry(result);
+    auto list_data = FlatVector::GetData<list_entry_t>(result);
+
+    idx_t total_children = 0;
+    for (idx_t i = 0; i < list_size; i++) {
+        auto cell = FlatVector::GetData<uint64_t>(cell_vec)[i];
+
+        uint64_t children[4];
+        quadbin::cell_to_children(cell, children);
+
+        list_data[i].offset = total_children;
+        list_data[i].length = 4;
+
+        ListVector::Reserve(result, total_children + 4);
+        auto child_data = FlatVector::GetData<uint64_t>(list_entries);
+        for (int j = 0; j < 4; j++) {
+            child_data[total_children + j] = children[j];
+        }
+        total_children += 4;
+    }
+    ListVector::SetListSize(result, total_children);
+}
+
+// quadbin_to_children(cell, resolution) -> LIST(UBIGINT)
+// Get all children cells at specified resolution
+static void QuadbinToChildrenResFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+    auto &res_vec = args.data[1];
+    auto list_size = args.size();
+
+    auto &list_entries = ListVector::GetEntry(result);
+    auto list_data = FlatVector::GetData<list_entry_t>(result);
+
+    idx_t total_children = 0;
+    for (idx_t i = 0; i < list_size; i++) {
+        auto cell = FlatVector::GetData<uint64_t>(cell_vec)[i];
+        auto target_res = FlatVector::GetData<int32_t>(res_vec)[i];
+
+        int current_res = quadbin::cell_to_resolution(cell);
+        if (target_res <= current_res || target_res > 26) {
+            list_data[i].offset = total_children;
+            list_data[i].length = 0;
+            continue;
+        }
+
+        int res_diff = target_res - current_res;
+        int num_children = 1 << (2 * res_diff);  // 4^res_diff
+
+        // Allocate space for children
+        std::vector<uint64_t> children(num_children);
+        int count;
+        quadbin::cell_to_children(cell, target_res, children.data(), count);
+
+        list_data[i].offset = total_children;
+        list_data[i].length = count;
+
+        ListVector::Reserve(result, total_children + count);
+        auto child_data = FlatVector::GetData<uint64_t>(list_entries);
+        for (int j = 0; j < count; j++) {
+            child_data[total_children + j] = children[j];
+        }
+        total_children += count;
+    }
+    ListVector::SetListSize(result, total_children);
+}
+
+// quadbin_sibling(cell) -> LIST(UBIGINT)
+// Get sibling cells (other children of the same parent)
+static void QuadbinSiblingFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+    auto list_size = args.size();
+
+    auto &list_entries = ListVector::GetEntry(result);
+    auto list_data = FlatVector::GetData<list_entry_t>(result);
+
+    idx_t total_siblings = 0;
+    for (idx_t i = 0; i < list_size; i++) {
+        auto cell = FlatVector::GetData<uint64_t>(cell_vec)[i];
+
+        uint64_t siblings[4];
+        quadbin::cell_siblings(cell, siblings);
+
+        list_data[i].offset = total_siblings;
+        list_data[i].length = 4;
+
+        ListVector::Reserve(result, total_siblings + 4);
+        auto sibling_data = FlatVector::GetData<uint64_t>(list_entries);
+        for (int j = 0; j < 4; j++) {
+            sibling_data[total_siblings + j] = siblings[j];
+        }
+        total_siblings += 4;
+    }
+    ListVector::SetListSize(result, total_siblings);
+}
+
+// quadbin_kring(cell, k) -> LIST(UBIGINT)
+// Get cells within k distance from center
+static void QuadbinKringFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+    auto &k_vec = args.data[1];
+    auto list_size = args.size();
+
+    auto &list_entries = ListVector::GetEntry(result);
+    auto list_data = FlatVector::GetData<list_entry_t>(result);
+
+    idx_t total_neighbors = 0;
+    for (idx_t i = 0; i < list_size; i++) {
+        auto cell = FlatVector::GetData<uint64_t>(cell_vec)[i];
+        auto k = FlatVector::GetData<int32_t>(k_vec)[i];
+
+        if (k < 0) {
+            list_data[i].offset = total_neighbors;
+            list_data[i].length = 0;
+            continue;
+        }
+
+        // Maximum possible neighbors: (2k+1)^2
+        int max_neighbors = (2 * k + 1) * (2 * k + 1);
+        std::vector<uint64_t> neighbors(max_neighbors);
+        int count;
+        quadbin::cell_kring(cell, k, neighbors.data(), count);
+
+        list_data[i].offset = total_neighbors;
+        list_data[i].length = count;
+
+        ListVector::Reserve(result, total_neighbors + count);
+        auto neighbor_data = FlatVector::GetData<uint64_t>(list_entries);
+        for (int j = 0; j < count; j++) {
+            neighbor_data[total_neighbors + j] = neighbors[j];
+        }
+        total_neighbors += count;
+    }
+    ListVector::SetListSize(result, total_neighbors);
+}
+
 void RegisterQuadbinFunctions(ExtensionLoader &loader) {
     // quadbin_from_tile(x, y, z) -> UBIGINT
     ScalarFunction from_tile("quadbin_from_tile",
@@ -332,6 +578,88 @@ void RegisterQuadbinFunctions(ExtensionLoader &loader) {
         LogicalType::UBIGINT,
         QuadbinCellForPointFunction);
     loader.RegisterFunction(cell_for_point);
+
+    // ========================================================================
+    // Spatial Format Functions (DuckDB Spatial compatibility)
+    // ========================================================================
+
+    // quadbin_to_wkt(cell) -> VARCHAR
+    // Returns WKT POLYGON for use with ST_GeomFromText
+    ScalarFunction to_wkt("quadbin_to_wkt",
+        {LogicalType::UBIGINT},
+        LogicalType::VARCHAR,
+        QuadbinToWktFunction);
+    loader.RegisterFunction(to_wkt);
+
+    // quadbin_to_geojson(cell) -> VARCHAR
+    // Returns GeoJSON for use with ST_GeomFromGeoJSON
+    ScalarFunction to_geojson("quadbin_to_geojson",
+        {LogicalType::UBIGINT},
+        LogicalType::VARCHAR,
+        QuadbinToGeojsonFunction);
+    loader.RegisterFunction(to_geojson);
+
+    // quadbin_boundary(cell) -> VARCHAR
+    // Alias for quadbin_to_wkt - named for PostGIS compatibility
+    ScalarFunction boundary("quadbin_boundary",
+        {LogicalType::UBIGINT},
+        LogicalType::VARCHAR,
+        QuadbinBoundaryFunction);
+    loader.RegisterFunction(boundary);
+
+    // ========================================================================
+    // Hierarchical Functions (parent, children, siblings, kring)
+    // ========================================================================
+
+    // quadbin_to_parent(cell) -> UBIGINT
+    // Get parent cell at resolution - 1
+    ScalarFunction to_parent("quadbin_to_parent",
+        {LogicalType::UBIGINT},
+        LogicalType::UBIGINT,
+        QuadbinToParentFunction);
+    loader.RegisterFunction(to_parent);
+
+    // quadbin_to_parent(cell, resolution) -> UBIGINT
+    // Get parent cell at specified resolution
+    ScalarFunctionSet to_parent_set("quadbin_to_parent");
+    to_parent_set.AddFunction(ScalarFunction(
+        {LogicalType::UBIGINT},
+        LogicalType::UBIGINT,
+        QuadbinToParentFunction));
+    to_parent_set.AddFunction(ScalarFunction(
+        {LogicalType::UBIGINT, LogicalType::INTEGER},
+        LogicalType::UBIGINT,
+        QuadbinToParentResFunction));
+    loader.RegisterFunction(to_parent_set);
+
+    // quadbin_to_children(cell) -> LIST(UBIGINT)
+    // Get 4 children cells at resolution + 1
+    ScalarFunctionSet to_children_set("quadbin_to_children");
+    to_children_set.AddFunction(ScalarFunction(
+        {LogicalType::UBIGINT},
+        LogicalType::LIST(LogicalType::UBIGINT),
+        QuadbinToChildrenFunction));
+    to_children_set.AddFunction(ScalarFunction(
+        {LogicalType::UBIGINT, LogicalType::INTEGER},
+        LogicalType::LIST(LogicalType::UBIGINT),
+        QuadbinToChildrenResFunction));
+    loader.RegisterFunction(to_children_set);
+
+    // quadbin_sibling(cell) -> LIST(UBIGINT)
+    // Get sibling cells (other children of the same parent)
+    ScalarFunction sibling("quadbin_sibling",
+        {LogicalType::UBIGINT},
+        LogicalType::LIST(LogicalType::UBIGINT),
+        QuadbinSiblingFunction);
+    loader.RegisterFunction(sibling);
+
+    // quadbin_kring(cell, k) -> LIST(UBIGINT)
+    // Get cells within k distance from center
+    ScalarFunction kring("quadbin_kring",
+        {LogicalType::UBIGINT, LogicalType::INTEGER},
+        LogicalType::LIST(LogicalType::UBIGINT),
+        QuadbinKringFunction);
+    loader.RegisterFunction(kring);
 }
 
 } // namespace duckdb

@@ -12,6 +12,7 @@ void RegisterQuadbinFunctions(ExtensionLoader &loader);
 void RegisterRasterValueFunctions(ExtensionLoader &loader);
 void RegisterRasterStatsFunctions(ExtensionLoader &loader);
 void RegisterMetadataFunctions(ExtensionLoader &loader);
+void RegisterRaquetTableFunctions(ExtensionLoader &loader);
 
 static void LoadInternal(ExtensionLoader &loader) {
     // Register all functions
@@ -19,6 +20,7 @@ static void LoadInternal(ExtensionLoader &loader) {
     RegisterRasterValueFunctions(loader);
     RegisterRasterStatsFunctions(loader);
     RegisterMetadataFunctions(loader);
+    RegisterRaquetTableFunctions(loader);
 }
 
 void RaquetExtension::Load(ExtensionLoader &loader) {

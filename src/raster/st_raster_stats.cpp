@@ -5,50 +5,20 @@
 #include "band_decoder.hpp"
 #include "quadbin.hpp"
 #include <cmath>
-#include <limits>
 
 namespace duckdb {
-
-struct RasterStats {
-    int64_t count = 0;
-    double sum = 0.0;
-    double min = std::numeric_limits<double>::max();
-    double max = std::numeric_limits<double>::lowest();
-    double mean = 0.0;
-    double stddev = 0.0;
-
-    // For Welford's online algorithm
-    double m2 = 0.0;
-
-    void add_value(double val) {
-        count++;
-        sum += val;
-        if (val < min) min = val;
-        if (val > max) max = val;
-
-        // Welford's online algorithm for mean and variance
-        double delta = val - mean;
-        mean += delta / count;
-        double delta2 = val - mean;
-        m2 += delta * delta2;
-    }
-
-    void finalize() {
-        if (count > 0) {
-            mean = sum / count;
-            if (count > 1) {
-                stddev = std::sqrt(m2 / (count - 1));
-            }
-        } else {
-            min = 0;
-            max = 0;
-        }
-    }
-};
 
 // ST_RasterSummaryStats(band BLOB, dtype VARCHAR, width INT, height INT, compression VARCHAR, nodata DOUBLE)
 // -> STRUCT(count BIGINT, sum DOUBLE, mean DOUBLE, min DOUBLE, max DOUBLE, stddev DOUBLE)
 static void STRasterSummaryStatsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    // Flatten all input vectors to ensure consistent access
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+    args.data[2].Flatten(args.size());
+    args.data[3].Flatten(args.size());
+    args.data[4].Flatten(args.size());
+    args.data[5].Flatten(args.size());
+
     auto &band_vec = args.data[0];
     auto &dtype_vec = args.data[1];
     auto &width_vec = args.data[2];
@@ -63,6 +33,8 @@ static void STRasterSummaryStatsFunction(DataChunk &args, ExpressionState &state
     auto compression_data = FlatVector::GetData<string_t>(compression_vec);
     auto nodata_data = FlatVector::GetData<double>(nodata_vec);
 
+    auto &band_validity = FlatVector::Validity(band_vec);
+
     auto &struct_entries = StructVector::GetEntries(result);
     auto count_data = FlatVector::GetData<int64_t>(*struct_entries[0]);
     auto sum_data = FlatVector::GetData<double>(*struct_entries[1]);
@@ -71,8 +43,21 @@ static void STRasterSummaryStatsFunction(DataChunk &args, ExpressionState &state
     auto max_data = FlatVector::GetData<double>(*struct_entries[4]);
     auto stddev_data = FlatVector::GetData<double>(*struct_entries[5]);
 
+    auto &result_validity = FlatVector::Validity(result);
+
     for (idx_t i = 0; i < args.size(); i++) {
+        // Check for NULL band data
+        if (!band_validity.RowIsValid(i)) {
+            result_validity.SetInvalid(i);
+            continue;
+        }
+
         auto band = band_data[i];
+        if (band.GetSize() == 0) {
+            result_validity.SetInvalid(i);
+            continue;
+        }
+
         auto dtype = dtype_data[i].GetString();
         auto width = width_data[i];
         auto height = height_data[i];
@@ -82,27 +67,25 @@ static void STRasterSummaryStatsFunction(DataChunk &args, ExpressionState &state
         bool compressed = (compression == "gzip");
         bool has_nodata = !std::isnan(nodata);
 
-        auto values = raquet::decode_band(
-            reinterpret_cast<const uint8_t*>(band.GetData()),
-            band.GetSize(),
-            dtype, width, height, compressed
-        );
+        try {
+            // Use streaming stats for better performance (avoids allocating full pixel array)
+            auto stats = raquet::compute_band_stats(
+                reinterpret_cast<const uint8_t*>(band.GetData()),
+                band.GetSize(),
+                dtype, width, height, compressed,
+                has_nodata, nodata
+            );
 
-        RasterStats stats;
-        for (double val : values) {
-            if (has_nodata && val == nodata) {
-                continue;  // Skip nodata values
-            }
-            stats.add_value(val);
+            count_data[i] = stats.count;
+            sum_data[i] = stats.sum;
+            mean_data[i] = stats.mean;
+            min_data[i] = stats.min;
+            max_data[i] = stats.max;
+            stddev_data[i] = stats.stddev;
+        } catch (const std::exception &e) {
+            // On decompression failure, return NULL
+            result_validity.SetInvalid(i);
         }
-        stats.finalize();
-
-        count_data[i] = stats.count;
-        sum_data[i] = stats.sum;
-        mean_data[i] = stats.mean;
-        min_data[i] = stats.min;
-        max_data[i] = stats.max;
-        stddev_data[i] = stats.stddev;
     }
 
     result.SetVectorType(VectorType::FLAT_VECTOR);
@@ -110,6 +93,13 @@ static void STRasterSummaryStatsFunction(DataChunk &args, ExpressionState &state
 
 // Simplified version without nodata
 static void STRasterSummaryStatsSimpleFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    // Flatten all input vectors to ensure consistent access
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+    args.data[2].Flatten(args.size());
+    args.data[3].Flatten(args.size());
+    args.data[4].Flatten(args.size());
+
     auto &band_vec = args.data[0];
     auto &dtype_vec = args.data[1];
     auto &width_vec = args.data[2];
@@ -122,6 +112,8 @@ static void STRasterSummaryStatsSimpleFunction(DataChunk &args, ExpressionState 
     auto height_data = FlatVector::GetData<int32_t>(height_vec);
     auto compression_data = FlatVector::GetData<string_t>(compression_vec);
 
+    auto &band_validity = FlatVector::Validity(band_vec);
+
     auto &struct_entries = StructVector::GetEntries(result);
     auto count_data = FlatVector::GetData<int64_t>(*struct_entries[0]);
     auto sum_data = FlatVector::GetData<double>(*struct_entries[1]);
@@ -130,8 +122,21 @@ static void STRasterSummaryStatsSimpleFunction(DataChunk &args, ExpressionState 
     auto max_data = FlatVector::GetData<double>(*struct_entries[4]);
     auto stddev_data = FlatVector::GetData<double>(*struct_entries[5]);
 
+    auto &result_validity = FlatVector::Validity(result);
+
     for (idx_t i = 0; i < args.size(); i++) {
+        // Check for NULL band data
+        if (!band_validity.RowIsValid(i)) {
+            result_validity.SetInvalid(i);
+            continue;
+        }
+
         auto band = band_data[i];
+        if (band.GetSize() == 0) {
+            result_validity.SetInvalid(i);
+            continue;
+        }
+
         auto dtype = dtype_data[i].GetString();
         auto width = width_data[i];
         auto height = height_data[i];
@@ -139,24 +144,25 @@ static void STRasterSummaryStatsSimpleFunction(DataChunk &args, ExpressionState 
 
         bool compressed = (compression == "gzip");
 
-        auto values = raquet::decode_band(
-            reinterpret_cast<const uint8_t*>(band.GetData()),
-            band.GetSize(),
-            dtype, width, height, compressed
-        );
+        try {
+            // Use streaming stats for better performance (avoids allocating full pixel array)
+            auto stats = raquet::compute_band_stats(
+                reinterpret_cast<const uint8_t*>(band.GetData()),
+                band.GetSize(),
+                dtype, width, height, compressed,
+                false, 0.0  // no nodata filtering
+            );
 
-        RasterStats stats;
-        for (double val : values) {
-            stats.add_value(val);
+            count_data[i] = stats.count;
+            sum_data[i] = stats.sum;
+            mean_data[i] = stats.mean;
+            min_data[i] = stats.min;
+            max_data[i] = stats.max;
+            stddev_data[i] = stats.stddev;
+        } catch (const std::exception &e) {
+            // On decompression failure, return NULL
+            result_validity.SetInvalid(i);
         }
-        stats.finalize();
-
-        count_data[i] = stats.count;
-        sum_data[i] = stats.sum;
-        mean_data[i] = stats.mean;
-        min_data[i] = stats.min;
-        max_data[i] = stats.max;
-        stddev_data[i] = stats.stddev;
     }
 
     result.SetVectorType(VectorType::FLAT_VECTOR);

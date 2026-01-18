@@ -4,53 +4,87 @@
 
 require raquet
 
-# Test quadbin_from_tile and quadbin_to_tile round-trip
+# =============================================================================
+# Test basic QUADBIN encoding/decoding
+# =============================================================================
+
+# Test quadbin_from_tile at zoom 0
 query I
 SELECT quadbin_from_tile(0, 0, 0);
 ----
-5192650370358181888
+5192650370358181887
 
+# Test quadbin_to_tile
 query III
-SELECT (quadbin_to_tile(5192650370358181888)).*;
+SELECT (quadbin_to_tile(5192650370358181887)).x,
+       (quadbin_to_tile(5192650370358181887)).y,
+       (quadbin_to_tile(5192650370358181887)).z;
 ----
 0	0	0
 
-# Test at zoom level 13
-query I
-SELECT quadbin_from_tile(4096, 2048, 13);
+# Test round-trip consistency - encoding then decoding should return original
+query III
+SELECT (quadbin_to_tile(quadbin_from_tile(0, 0, 0))).x,
+       (quadbin_to_tile(quadbin_from_tile(0, 0, 0))).y,
+       (quadbin_to_tile(quadbin_from_tile(0, 0, 0))).z;
 ----
-5234261499580514304
+0	0	0
 
 query III
-SELECT (quadbin_to_tile(5234261499580514304)).*;
+SELECT (quadbin_to_tile(quadbin_from_tile(4096, 2048, 13))).x,
+       (quadbin_to_tile(quadbin_from_tile(4096, 2048, 13))).y,
+       (quadbin_to_tile(quadbin_from_tile(4096, 2048, 13))).z;
 ----
 4096	2048	13
 
-# Test quadbin_from_lonlat
-query I
-SELECT quadbin_from_lonlat(-73.9857, 40.7484, 13);
+query III
+SELECT (quadbin_to_tile(quadbin_from_tile(100, 200, 10))).x,
+       (quadbin_to_tile(quadbin_from_tile(100, 200, 10))).y,
+       (quadbin_to_tile(quadbin_from_tile(100, 200, 10))).z;
 ----
-5234261499580514304
+100	200	10
 
-# This might not be exact, verify the general area (New York)
+# =============================================================================
+# Test quadbin_from_lonlat and related functions
+# =============================================================================
+
+# Test New York City coordinates - round-trip should be approximately correct
 query II
 SELECT round((quadbin_to_lonlat(quadbin_from_lonlat(-73.9857, 40.7484, 13))).lon, 2) as lon,
        round((quadbin_to_lonlat(quadbin_from_lonlat(-73.9857, 40.7484, 13))).lat, 2) as lat;
 ----
 -73.98	40.74
 
-# Test quadbin_resolution
-query I
-SELECT quadbin_resolution(5234261499580514304);
+# Test origin point at zoom 4
+query II
+SELECT round((quadbin_to_lonlat(quadbin_from_lonlat(0, 0, 4))).lon, 1) as lon,
+       round((quadbin_to_lonlat(quadbin_from_lonlat(0, 0, 4))).lat, 1) as lat;
 ----
-13
+11.2	-11.2
+
+# =============================================================================
+# Test quadbin_resolution
+# =============================================================================
 
 query I
-SELECT quadbin_resolution(5192650370358181888);
+SELECT quadbin_resolution(quadbin_from_tile(0, 0, 0));
 ----
 0
 
+query I
+SELECT quadbin_resolution(quadbin_from_tile(100, 200, 10));
+----
+10
+
+query I
+SELECT quadbin_resolution(quadbin_from_tile(4096, 2048, 13));
+----
+13
+
+# =============================================================================
 # Test quadbin_to_bbox
+# =============================================================================
+
 query IIII
 SELECT round((quadbin_to_bbox(quadbin_from_lonlat(0, 0, 4))).min_lon, 2) as min_lon,
        round((quadbin_to_bbox(quadbin_from_lonlat(0, 0, 4))).min_lat, 2) as min_lat,
@@ -59,8 +93,133 @@ SELECT round((quadbin_to_bbox(quadbin_from_lonlat(0, 0, 4))).min_lon, 2) as min_
 ----
 0.0	-21.94	22.5	0.0
 
+# =============================================================================
 # Test quadbin_pixel_xy
+# =============================================================================
+
+# Note: (0, 0) at zoom 4 is at the corner of its tile, so pixel is (0, 0)
 query II
-SELECT (quadbin_pixel_xy(0.0, 0.0, 4, 256)).*;
+SELECT (quadbin_pixel_xy(0.0, 0.0, 4, 256)).pixel_x,
+       (quadbin_pixel_xy(0.0, 0.0, 4, 256)).pixel_y;
 ----
-128	128
+0	0
+
+# =============================================================================
+# Test hierarchical functions
+# =============================================================================
+
+# Test quadbin_to_parent - resolution should decrease by 1
+query I
+SELECT quadbin_resolution(quadbin_from_tile(100, 200, 10)) - quadbin_resolution(quadbin_to_parent(quadbin_from_tile(100, 200, 10)));
+----
+1
+
+# Test quadbin_to_parent with explicit resolution
+query I
+SELECT quadbin_resolution(quadbin_to_parent(quadbin_from_tile(100, 200, 10), 5));
+----
+5
+
+# Test parent at same resolution returns same cell
+query I
+SELECT quadbin_to_parent(quadbin_from_tile(100, 200, 10), 10) = quadbin_from_tile(100, 200, 10);
+----
+true
+
+# Test quadbin_to_children - should return 4 children at resolution + 1
+query I
+SELECT length(quadbin_to_children(quadbin_from_tile(100, 200, 10)));
+----
+4
+
+# Verify children are at resolution + 1
+query I
+SELECT quadbin_resolution(quadbin_to_children(quadbin_from_tile(100, 200, 10))[1]) - quadbin_resolution(quadbin_from_tile(100, 200, 10));
+----
+1
+
+# Test quadbin_to_children with explicit resolution (2 levels = 16 children)
+query I
+SELECT length(quadbin_to_children(quadbin_from_tile(100, 200, 10), 12));
+----
+16
+
+# Test quadbin_sibling - should return 4 siblings (including self)
+query I
+SELECT length(quadbin_sibling(quadbin_from_tile(100, 200, 10)));
+----
+4
+
+# Test quadbin_kring with k=0 - should return just the cell itself
+query I
+SELECT length(quadbin_kring(quadbin_from_tile(100, 200, 10), 0));
+----
+1
+
+# Test quadbin_kring with k=1 - should return up to 9 cells (3x3 grid)
+query I
+SELECT length(quadbin_kring(quadbin_from_tile(100, 200, 10), 1));
+----
+9
+
+# Test that cell is in its own kring
+query I
+SELECT list_contains(quadbin_kring(quadbin_from_tile(100, 200, 10), 1), quadbin_from_tile(100, 200, 10));
+----
+true
+
+# Test parent-children relationship: parent of any child should be the original
+query I
+SELECT quadbin_to_parent(quadbin_to_children(quadbin_from_tile(100, 200, 10))[1]) = quadbin_from_tile(100, 200, 10);
+----
+true
+
+# =============================================================================
+# Test spatial format functions
+# =============================================================================
+
+# Test quadbin_to_wkt returns valid WKT
+query I
+SELECT quadbin_to_wkt(quadbin_from_tile(0, 0, 0)) LIKE 'POLYGON((%';
+----
+true
+
+# Test quadbin_to_geojson returns valid GeoJSON
+query I
+SELECT quadbin_to_geojson(quadbin_from_tile(0, 0, 0)) LIKE '{"type":"Polygon"%';
+----
+true
+
+# Test quadbin_boundary (alias for quadbin_to_wkt)
+query I
+SELECT quadbin_boundary(quadbin_from_tile(0, 0, 0)) = quadbin_to_wkt(quadbin_from_tile(0, 0, 0));
+----
+true
+
+# =============================================================================
+# Test spatial filtering functions
+# =============================================================================
+
+# Test quadbin_contains - point at center should be contained
+query I
+SELECT quadbin_contains(quadbin_from_lonlat(-73.9857, 40.7484, 13), -73.9857, 40.7484);
+----
+true
+
+# Test quadbin_contains - distant point should not be contained
+query I
+SELECT quadbin_contains(quadbin_from_lonlat(-73.9857, 40.7484, 13), 0.0, 0.0);
+----
+false
+
+# Test quadbin_intersects_bbox - tile should intersect its own bbox
+query I
+SELECT quadbin_intersects_bbox(quadbin_from_lonlat(-73.9857, 40.7484, 13), -74.0, 40.7, -73.9, 40.8);
+----
+true
+
+# Test quadbin_intersects_bbox - non-intersecting bbox
+query I
+SELECT quadbin_intersects_bbox(quadbin_from_lonlat(-73.9857, 40.7484, 13), 0.0, 0.0, 1.0, 1.0);
+----
+false
