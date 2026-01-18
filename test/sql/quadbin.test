@@ -1,0 +1,66 @@
+# name: test/sql/quadbin.test
+# description: Test QUADBIN functions
+# group: [raquet]
+
+require raquet
+
+# Test quadbin_from_tile and quadbin_to_tile round-trip
+query I
+SELECT quadbin_from_tile(0, 0, 0);
+----
+5192650370358181888
+
+query III
+SELECT (quadbin_to_tile(5192650370358181888)).*;
+----
+0	0	0
+
+# Test at zoom level 13
+query I
+SELECT quadbin_from_tile(4096, 2048, 13);
+----
+5234261499580514304
+
+query III
+SELECT (quadbin_to_tile(5234261499580514304)).*;
+----
+4096	2048	13
+
+# Test quadbin_from_lonlat
+query I
+SELECT quadbin_from_lonlat(-73.9857, 40.7484, 13);
+----
+5234261499580514304
+
+# This might not be exact, verify the general area (New York)
+query II
+SELECT round((quadbin_to_lonlat(quadbin_from_lonlat(-73.9857, 40.7484, 13))).lon, 2) as lon,
+       round((quadbin_to_lonlat(quadbin_from_lonlat(-73.9857, 40.7484, 13))).lat, 2) as lat;
+----
+-73.98	40.74
+
+# Test quadbin_resolution
+query I
+SELECT quadbin_resolution(5234261499580514304);
+----
+13
+
+query I
+SELECT quadbin_resolution(5192650370358181888);
+----
+0
+
+# Test quadbin_to_bbox
+query IIII
+SELECT round((quadbin_to_bbox(quadbin_from_lonlat(0, 0, 4))).min_lon, 2) as min_lon,
+       round((quadbin_to_bbox(quadbin_from_lonlat(0, 0, 4))).min_lat, 2) as min_lat,
+       round((quadbin_to_bbox(quadbin_from_lonlat(0, 0, 4))).max_lon, 2) as max_lon,
+       round((quadbin_to_bbox(quadbin_from_lonlat(0, 0, 4))).max_lat, 2) as max_lat;
+----
+0.0	-21.94	22.5	0.0
+
+# Test quadbin_pixel_xy
+query II
+SELECT (quadbin_pixel_xy(0.0, 0.0, 4, 256)).*;
+----
+128	128
