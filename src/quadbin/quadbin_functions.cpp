@@ -157,6 +157,87 @@ static void QuadbinPixelXYFunction(DataChunk &args, ExpressionState &state, Vect
     result.SetVectorType(VectorType::FLAT_VECTOR);
 }
 
+// ============================================================================
+// Spatial Filtering Functions
+// ============================================================================
+
+// quadbin_contains(cell, lon, lat) -> BOOLEAN
+// Check if a point (lon, lat) falls within the tile represented by cell
+static void QuadbinContainsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &cell_vec = args.data[0];
+    auto &lon_vec = args.data[1];
+    auto &lat_vec = args.data[2];
+
+    TernaryExecutor::Execute<uint64_t, double, double, bool>(
+        cell_vec, lon_vec, lat_vec, result, args.size(),
+        [](uint64_t cell, double lon, double lat) {
+            // Get the tile coordinates from the cell
+            int tile_x, tile_y, z;
+            quadbin::cell_to_tile(cell, tile_x, tile_y, z);
+
+            // Get the tile coordinates for the point at the same resolution
+            int point_tile_x, point_tile_y;
+            quadbin::lonlat_to_tile(lon, lat, z, point_tile_x, point_tile_y);
+
+            // Point is in tile if tile coordinates match
+            return (tile_x == point_tile_x && tile_y == point_tile_y);
+        });
+}
+
+// quadbin_intersects_bbox(cell, min_lon, min_lat, max_lon, max_lat) -> BOOLEAN
+// Check if a tile intersects a bounding box
+static void QuadbinIntersectsBboxFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+    args.data[2].Flatten(args.size());
+    args.data[3].Flatten(args.size());
+    args.data[4].Flatten(args.size());
+
+    auto cell_data = FlatVector::GetData<uint64_t>(args.data[0]);
+    auto min_lon_data = FlatVector::GetData<double>(args.data[1]);
+    auto min_lat_data = FlatVector::GetData<double>(args.data[2]);
+    auto max_lon_data = FlatVector::GetData<double>(args.data[3]);
+    auto max_lat_data = FlatVector::GetData<double>(args.data[4]);
+    auto result_data = FlatVector::GetData<bool>(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto cell = cell_data[i];
+        auto query_min_lon = min_lon_data[i];
+        auto query_min_lat = min_lat_data[i];
+        auto query_max_lon = max_lon_data[i];
+        auto query_max_lat = max_lat_data[i];
+
+        // Get tile bbox
+        int tile_x, tile_y, z;
+        quadbin::cell_to_tile(cell, tile_x, tile_y, z);
+
+        double tile_min_lon, tile_min_lat, tile_max_lon, tile_max_lat;
+        quadbin::tile_to_bbox_wgs84(tile_x, tile_y, z, tile_min_lon, tile_min_lat, tile_max_lon, tile_max_lat);
+
+        // Check for intersection (two boxes intersect if they overlap in both dimensions)
+        bool intersects = !(tile_max_lon < query_min_lon ||  // tile is left of query
+                           tile_min_lon > query_max_lon ||  // tile is right of query
+                           tile_max_lat < query_min_lat ||  // tile is below query
+                           tile_min_lat > query_max_lat);   // tile is above query
+
+        result_data[i] = intersects;
+    }
+}
+
+// quadbin_cell_for_point(lon, lat, resolution) -> UBIGINT
+// Alias for quadbin_from_lonlat - for clarity in spatial queries
+static void QuadbinCellForPointFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    auto &lon_vec = args.data[0];
+    auto &lat_vec = args.data[1];
+    auto &res_vec = args.data[2];
+
+    TernaryExecutor::Execute<double, double, int32_t, uint64_t>(
+        lon_vec, lat_vec, res_vec, result, args.size(),
+        [](double lon, double lat, int32_t resolution) {
+            return quadbin::lonlat_to_cell(lon, lat, resolution);
+        });
+}
+
 void RegisterQuadbinFunctions(ExtensionLoader &loader) {
     // quadbin_from_tile(x, y, z) -> UBIGINT
     ScalarFunction from_tile("quadbin_from_tile",
@@ -225,6 +306,32 @@ void RegisterQuadbinFunctions(ExtensionLoader &loader) {
         LogicalType::STRUCT(pixel_struct),
         QuadbinPixelXYFunction);
     loader.RegisterFunction(pixel_xy);
+
+    // ========================================================================
+    // Spatial Filtering Functions
+    // ========================================================================
+
+    // quadbin_contains(cell, lon, lat) -> BOOLEAN
+    ScalarFunction contains("quadbin_contains",
+        {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE},
+        LogicalType::BOOLEAN,
+        QuadbinContainsFunction);
+    loader.RegisterFunction(contains);
+
+    // quadbin_intersects_bbox(cell, min_lon, min_lat, max_lon, max_lat) -> BOOLEAN
+    ScalarFunction intersects_bbox("quadbin_intersects_bbox",
+        {LogicalType::UBIGINT, LogicalType::DOUBLE, LogicalType::DOUBLE,
+         LogicalType::DOUBLE, LogicalType::DOUBLE},
+        LogicalType::BOOLEAN,
+        QuadbinIntersectsBboxFunction);
+    loader.RegisterFunction(intersects_bbox);
+
+    // quadbin_cell_for_point(lon, lat, resolution) -> UBIGINT (alias for quadbin_from_lonlat)
+    ScalarFunction cell_for_point("quadbin_cell_for_point",
+        {LogicalType::DOUBLE, LogicalType::DOUBLE, LogicalType::INTEGER},
+        LogicalType::UBIGINT,
+        QuadbinCellForPointFunction);
+    loader.RegisterFunction(cell_for_point);
 }
 
 } // namespace duckdb

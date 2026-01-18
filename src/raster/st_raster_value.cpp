@@ -4,6 +4,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "band_decoder.hpp"
 #include "quadbin.hpp"
+#include "raquet_metadata.hpp"
 
 namespace duckdb {
 
@@ -183,6 +184,230 @@ static void RaquetDecodeBandFunction(DataChunk &args, ExpressionState &state, Ve
     ListVector::SetListSize(result, total_list_size);
 }
 
+// ============================================================================
+// Metadata-aware overloads (simplified API)
+// ============================================================================
+
+// raquet_pixel(band BLOB, metadata VARCHAR, x INT, y INT) -> DOUBLE
+// Get a single pixel value using metadata for dtype/width/compression
+static void RaquetPixelWithMetadataFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+    args.data[2].Flatten(args.size());
+    args.data[3].Flatten(args.size());
+
+    auto band_data = FlatVector::GetData<string_t>(args.data[0]);
+    auto metadata_data = FlatVector::GetData<string_t>(args.data[1]);
+    auto x_data = FlatVector::GetData<int32_t>(args.data[2]);
+    auto y_data = FlatVector::GetData<int32_t>(args.data[3]);
+    auto result_data = FlatVector::GetData<double>(result);
+    auto &result_mask = FlatVector::Validity(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto band = band_data[i];
+        auto metadata_str = metadata_data[i].GetString();
+        auto x = x_data[i];
+        auto y = y_data[i];
+
+        const char* band_ptr = band.GetData();
+        idx_t band_size = band.GetSize();
+
+        if (band_ptr == nullptr || band_size == 0) {
+            result_mask.SetInvalid(i);
+            continue;
+        }
+        if (x < 0 || y < 0) {
+            result_mask.SetInvalid(i);
+            continue;
+        }
+
+        try {
+            auto meta = raquet::parse_metadata(metadata_str);
+            std::string dtype = meta.bands.empty() ? "uint8" : meta.bands[0].second;
+            bool compressed = (meta.compression == "gzip");
+
+            result_data[i] = raquet::decode_pixel(
+                reinterpret_cast<const uint8_t*>(band_ptr),
+                static_cast<size_t>(band_size),
+                dtype, x, y, meta.block_width, compressed
+            );
+        } catch (const std::exception &e) {
+            throw InvalidInputException("raquet_pixel error: %s", e.what());
+        }
+    }
+}
+
+// raquet_pixel(band BLOB, metadata VARCHAR, band_index INT, x INT, y INT) -> DOUBLE
+// Get a single pixel value with explicit band index for dtype
+static void RaquetPixelWithMetadataAndBandFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+    args.data[2].Flatten(args.size());
+    args.data[3].Flatten(args.size());
+    args.data[4].Flatten(args.size());
+
+    auto band_data = FlatVector::GetData<string_t>(args.data[0]);
+    auto metadata_data = FlatVector::GetData<string_t>(args.data[1]);
+    auto band_idx_data = FlatVector::GetData<int32_t>(args.data[2]);
+    auto x_data = FlatVector::GetData<int32_t>(args.data[3]);
+    auto y_data = FlatVector::GetData<int32_t>(args.data[4]);
+    auto result_data = FlatVector::GetData<double>(result);
+    auto &result_mask = FlatVector::Validity(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto band = band_data[i];
+        auto metadata_str = metadata_data[i].GetString();
+        auto band_idx = band_idx_data[i];
+        auto x = x_data[i];
+        auto y = y_data[i];
+
+        const char* band_ptr = band.GetData();
+        idx_t band_size = band.GetSize();
+
+        if (band_ptr == nullptr || band_size == 0) {
+            result_mask.SetInvalid(i);
+            continue;
+        }
+        if (x < 0 || y < 0 || band_idx < 0) {
+            result_mask.SetInvalid(i);
+            continue;
+        }
+
+        try {
+            auto meta = raquet::parse_metadata(metadata_str);
+            std::string dtype = meta.get_band_type(band_idx);
+            bool compressed = (meta.compression == "gzip");
+
+            result_data[i] = raquet::decode_pixel(
+                reinterpret_cast<const uint8_t*>(band_ptr),
+                static_cast<size_t>(band_size),
+                dtype, x, y, meta.block_width, compressed
+            );
+        } catch (const std::exception &e) {
+            throw InvalidInputException("raquet_pixel error: %s", e.what());
+        }
+    }
+}
+
+// ST_RasterValue(block UBIGINT, band BLOB, lon DOUBLE, lat DOUBLE, metadata VARCHAR) -> DOUBLE
+// Get pixel value at lon/lat using metadata for dtype/width/compression
+static void STRasterValueWithMetadataFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+    args.data[2].Flatten(args.size());
+    args.data[3].Flatten(args.size());
+    args.data[4].Flatten(args.size());
+
+    auto block_data = FlatVector::GetData<uint64_t>(args.data[0]);
+    auto band_data = FlatVector::GetData<string_t>(args.data[1]);
+    auto lon_data = FlatVector::GetData<double>(args.data[2]);
+    auto lat_data = FlatVector::GetData<double>(args.data[3]);
+    auto metadata_data = FlatVector::GetData<string_t>(args.data[4]);
+    auto result_data = FlatVector::GetData<double>(result);
+    auto &result_mask = FlatVector::Validity(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto block = block_data[i];
+        auto band = band_data[i];
+        auto lon = lon_data[i];
+        auto lat = lat_data[i];
+        auto metadata_str = metadata_data[i].GetString();
+
+        if (band.GetSize() == 0) {
+            result_mask.SetInvalid(i);
+            continue;
+        }
+
+        try {
+            auto meta = raquet::parse_metadata(metadata_str);
+            std::string dtype = meta.bands.empty() ? "uint8" : meta.bands[0].second;
+            bool compressed = (meta.compression == "gzip");
+            int tile_size = meta.block_width;
+
+            int resolution = quadbin::cell_to_resolution(block);
+            int tile_x, tile_y, z;
+            quadbin::cell_to_tile(block, tile_x, tile_y, z);
+
+            int pixel_x, pixel_y, calc_tile_x, calc_tile_y;
+            quadbin::lonlat_to_pixel(lon, lat, resolution, tile_size, pixel_x, pixel_y, calc_tile_x, calc_tile_y);
+
+            if (calc_tile_x != tile_x || calc_tile_y != tile_y) {
+                result_mask.SetInvalid(i);
+                continue;
+            }
+
+            result_data[i] = raquet::decode_pixel(
+                reinterpret_cast<const uint8_t*>(band.GetData()),
+                band.GetSize(),
+                dtype, pixel_x, pixel_y, tile_size, compressed
+            );
+        } catch (const std::exception &e) {
+            throw InvalidInputException("ST_RasterValue error: %s", e.what());
+        }
+    }
+}
+
+// ST_RasterValue(block UBIGINT, band BLOB, lon DOUBLE, lat DOUBLE, metadata VARCHAR, band_index INT) -> DOUBLE
+// Get pixel value at lon/lat with explicit band index for dtype
+static void STRasterValueWithMetadataAndBandFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+    args.data[2].Flatten(args.size());
+    args.data[3].Flatten(args.size());
+    args.data[4].Flatten(args.size());
+    args.data[5].Flatten(args.size());
+
+    auto block_data = FlatVector::GetData<uint64_t>(args.data[0]);
+    auto band_data = FlatVector::GetData<string_t>(args.data[1]);
+    auto lon_data = FlatVector::GetData<double>(args.data[2]);
+    auto lat_data = FlatVector::GetData<double>(args.data[3]);
+    auto metadata_data = FlatVector::GetData<string_t>(args.data[4]);
+    auto band_idx_data = FlatVector::GetData<int32_t>(args.data[5]);
+    auto result_data = FlatVector::GetData<double>(result);
+    auto &result_mask = FlatVector::Validity(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto block = block_data[i];
+        auto band = band_data[i];
+        auto lon = lon_data[i];
+        auto lat = lat_data[i];
+        auto metadata_str = metadata_data[i].GetString();
+        auto band_idx = band_idx_data[i];
+
+        if (band.GetSize() == 0 || band_idx < 0) {
+            result_mask.SetInvalid(i);
+            continue;
+        }
+
+        try {
+            auto meta = raquet::parse_metadata(metadata_str);
+            std::string dtype = meta.get_band_type(band_idx);
+            bool compressed = (meta.compression == "gzip");
+            int tile_size = meta.block_width;
+
+            int resolution = quadbin::cell_to_resolution(block);
+            int tile_x, tile_y, z;
+            quadbin::cell_to_tile(block, tile_x, tile_y, z);
+
+            int pixel_x, pixel_y, calc_tile_x, calc_tile_y;
+            quadbin::lonlat_to_pixel(lon, lat, resolution, tile_size, pixel_x, pixel_y, calc_tile_x, calc_tile_y);
+
+            if (calc_tile_x != tile_x || calc_tile_y != tile_y) {
+                result_mask.SetInvalid(i);
+                continue;
+            }
+
+            result_data[i] = raquet::decode_pixel(
+                reinterpret_cast<const uint8_t*>(band.GetData()),
+                band.GetSize(),
+                dtype, pixel_x, pixel_y, tile_size, compressed
+            );
+        } catch (const std::exception &e) {
+            throw InvalidInputException("ST_RasterValue error: %s", e.what());
+        }
+    }
+}
+
 void RegisterRasterValueFunctions(ExtensionLoader &loader) {
     // raquet_pixel(band, dtype, x, y, width, compression) -> DOUBLE
     ScalarFunction pixel_fn("raquet_pixel",
@@ -207,6 +432,41 @@ void RegisterRasterValueFunctions(ExtensionLoader &loader) {
         LogicalType::LIST(LogicalType::DOUBLE),
         RaquetDecodeBandFunction);
     loader.RegisterFunction(decode_band_fn);
+
+    // ========================================================================
+    // Metadata-aware overloads (simplified API)
+    // ========================================================================
+
+    // raquet_pixel(band, metadata, x, y) -> DOUBLE
+    ScalarFunction pixel_meta_fn("raquet_pixel",
+        {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::INTEGER},
+        LogicalType::DOUBLE,
+        RaquetPixelWithMetadataFunction);
+    loader.RegisterFunction(pixel_meta_fn);
+
+    // raquet_pixel(band, metadata, band_index, x, y) -> DOUBLE
+    ScalarFunction pixel_meta_band_fn("raquet_pixel",
+        {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::INTEGER,
+         LogicalType::INTEGER, LogicalType::INTEGER},
+        LogicalType::DOUBLE,
+        RaquetPixelWithMetadataAndBandFunction);
+    loader.RegisterFunction(pixel_meta_band_fn);
+
+    // ST_RasterValue(block, band, lon, lat, metadata) -> DOUBLE
+    ScalarFunction raster_value_meta_fn("ST_RasterValue",
+        {LogicalType::UBIGINT, LogicalType::BLOB, LogicalType::DOUBLE,
+         LogicalType::DOUBLE, LogicalType::VARCHAR},
+        LogicalType::DOUBLE,
+        STRasterValueWithMetadataFunction);
+    loader.RegisterFunction(raster_value_meta_fn);
+
+    // ST_RasterValue(block, band, lon, lat, metadata, band_index) -> DOUBLE
+    ScalarFunction raster_value_meta_band_fn("ST_RasterValue",
+        {LogicalType::UBIGINT, LogicalType::BLOB, LogicalType::DOUBLE,
+         LogicalType::DOUBLE, LogicalType::VARCHAR, LogicalType::INTEGER},
+        LogicalType::DOUBLE,
+        STRasterValueWithMetadataAndBandFunction);
+    loader.RegisterFunction(raster_value_meta_band_fn);
 }
 
 } // namespace duckdb
