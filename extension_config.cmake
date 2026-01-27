@@ -11,3 +11,9 @@ duckdb_extension_load(httpfs
     GIT_URL https://github.com/duckdb/duckdb-httpfs
     GIT_TAG add35a03c1adfe530bb4ef69133b94fe8ec8ea35
 )
+
+# Include iceberg for lakehouse integration (iceberg_scan + raquet)
+duckdb_extension_load(iceberg
+    GIT_URL https://github.com/duckdb/duckdb-iceberg
+    GIT_TAG main
+)
