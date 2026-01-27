@@ -88,6 +88,79 @@ FROM read_parquet('dem.parquet')
 WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
 ```
 
+### Cloud-Native Queries
+
+Query RaQuet files directly from cloud storage with minimal data transfer:
+
+```sql
+-- Load extensions for remote access
+INSTALL httpfs;
+LOAD httpfs;
+LOAD raquet;
+
+-- Query Sentinel-2 imagery from Google Cloud Storage
+SELECT
+    block,
+    quadbin_resolution(block) as zoom,
+    (ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip', 0)).mean as red_mean
+FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
+WHERE quadbin_resolution(block) = 14
+LIMIT 5;
+
+-- Single point extraction (downloads only ~2KB, not the full 261MB file)
+SELECT
+    raquet_pixel(band_1, 'uint8',
+        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
+        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
+        256, 'gzip') as red,
+    raquet_pixel(band_2, 'uint8',
+        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
+        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
+        256, 'gzip') as green,
+    raquet_pixel(band_3, 'uint8',
+        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
+        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
+        256, 'gzip') as blue
+FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
+WHERE block = quadbin_from_lonlat(33.5, 16.85, 14);
+```
+
+### Time-Series Queries
+
+Query temporal rasters with CF conventions (NetCDF compatible):
+
+```sql
+LOAD raquet;
+
+-- Explore time-series structure
+SELECT
+    COUNT(*) as total_rows,
+    COUNT(DISTINCT block) as tiles,
+    MIN(time_ts) as earliest,
+    MAX(time_ts) as latest
+FROM read_parquet('cfsr_sst.parquet')
+WHERE block != 0;
+-- Result: 1,296 rows, 3 tiles, 1980-01-01 to 2015-12-01
+
+-- Filter by year using derived timestamp
+SELECT
+    time_ts,
+    (ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean as sst
+FROM read_parquet('cfsr_sst.parquet')
+WHERE block != 0 AND YEAR(time_ts) = 2010
+ORDER BY time_ts
+LIMIT 5;
+
+-- Calculate decadal averages
+SELECT
+    (YEAR(time_ts) / 10) * 10 as decade,
+    AVG((ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean) as avg_sst
+FROM read_parquet('cfsr_sst.parquet')
+WHERE block != 0
+GROUP BY (YEAR(time_ts) / 10) * 10
+ORDER BY decade;
+```
+
 ## Function Reference
 
 ### QUADBIN Functions
@@ -647,6 +720,19 @@ Or use tools like [rio-tiler](https://github.com/cogeotiff/rio-tiler) or [titile
 
 Apache 2.0
 
+## Performance
+
+DuckDB Raquet provides **10-100x performance improvements** for analytical raster workloads compared to PostGIS Raster:
+
+| Operation | DuckDB Raquet | PostGIS Raster | Speedup |
+|-----------|---------------|----------------|---------|
+| Single point extraction | 0.030s | 0.048s | 1.6x |
+| All tiles statistics | 0.15s | 2.2s | **14.6x** |
+| Band math (NDVI) | 0.69s | 72.6s | **105x** |
+| Spatial filter + stats | 0.06s | 0.41s | **6.8x** |
+
+See [docs/PERFORMANCE_COMPARISON.md](docs/PERFORMANCE_COMPARISON.md) for full benchmarks including cloud-native (GCS) performance.
+
 ## Related Projects
 
 - [Raquet Specification](https://github.com/CartoDB/raquet) - The Raquet format specification
@@ -680,6 +766,8 @@ CARTO provides sample Raquet files for testing:
 | File | Description | Time Range | Tiles × Time Steps |
 |------|-------------|------------|-------------------|
 | `cfsr_sst.parquet` | CFSR Sea Surface Temperature (monthly) | 1980-2015 | 3 × 432 = 1,296 rows |
+
+*Note: Time-series example available in the [raquet repository](https://github.com/CartoDB/raquet/tree/main/examples)*
 
 **Quick test with sample data:**
 
