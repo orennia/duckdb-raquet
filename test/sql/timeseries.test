@@ -1,0 +1,183 @@
+# name: test/sql/timeseries.test
+# description: Test time-series raster support with CF conventions
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test time-series schema with synthetic data
+# =============================================================================
+
+# Create a time-series test table mimicking CF conventions
+statement ok
+CREATE TABLE test_timeseries AS
+SELECT
+    5192650370358181887::UBIGINT as block,
+    '{"time": {"cf:units": "days since 2000-01-01", "cf:calendar": "standard"}}'::VARCHAR as metadata,
+    0.0::DOUBLE as time_cf,
+    '2000-01-01'::TIMESTAMP as time_ts,
+    '\x01\x02\x03\x04'::BLOB as band_1
+UNION ALL
+SELECT
+    5192650370358181887::UBIGINT,
+    '{"time": {"cf:units": "days since 2000-01-01", "cf:calendar": "standard"}}'::VARCHAR,
+    31.0::DOUBLE,  -- 31 days = Feb 1
+    '2000-02-01'::TIMESTAMP,
+    '\x05\x06\x07\x08'::BLOB
+UNION ALL
+SELECT
+    5192650370358181887::UBIGINT,
+    '{"time": {"cf:units": "days since 2000-01-01", "cf:calendar": "standard"}}'::VARCHAR,
+    365.0::DOUBLE,  -- 365 days = Jan 1, 2001
+    '2001-01-01'::TIMESTAMP,
+    '\x09\x0A\x0B\x0C'::BLOB
+
+# =============================================================================
+# Test basic time-series queries
+# =============================================================================
+
+# Test row count
+query I
+SELECT COUNT(*) FROM test_timeseries
+----
+3
+
+# Test filtering by derived timestamp (year)
+query I
+SELECT COUNT(*) FROM test_timeseries WHERE YEAR(time_ts) = 2000
+----
+2
+
+# Test filtering by derived timestamp (exact date)
+query I
+SELECT COUNT(*) FROM test_timeseries WHERE time_ts = '2000-01-01'
+----
+1
+
+# Test filtering by date range
+query I
+SELECT COUNT(*) FROM test_timeseries WHERE time_ts >= '2000-01-01' AND time_ts < '2001-01-01'
+----
+2
+
+# =============================================================================
+# Test CF time value correspondence
+# =============================================================================
+
+# Verify CF time values map correctly to timestamps
+query IR
+SELECT time_cf, time_ts FROM test_timeseries WHERE time_cf = 0.0
+----
+0.0	2000-01-01 00:00:00
+
+query IR
+SELECT time_cf, time_ts FROM test_timeseries WHERE time_cf = 31.0
+----
+31.0	2000-02-01 00:00:00
+
+query IR
+SELECT time_cf, time_ts FROM test_timeseries WHERE time_cf = 365.0
+----
+365.0	2001-01-01 00:00:00
+
+# =============================================================================
+# Test time-series aggregation
+# =============================================================================
+
+# Test aggregation by year
+query II
+SELECT YEAR(time_ts) as year, COUNT(*) as count FROM test_timeseries GROUP BY YEAR(time_ts) ORDER BY year
+----
+2000	2
+2001	1
+
+# Test MIN/MAX on timestamps
+query II
+SELECT MIN(time_ts), MAX(time_ts) FROM test_timeseries
+----
+2000-01-01 00:00:00	2001-01-01 00:00:00
+
+# =============================================================================
+# Test combined spatial + temporal filtering
+# =============================================================================
+
+# Filter by both block and time
+query I
+SELECT COUNT(*) FROM test_timeseries
+WHERE block = 5192650370358181887 AND YEAR(time_ts) = 2000
+----
+2
+
+# =============================================================================
+# Test raster functions with time-series data
+# =============================================================================
+
+# Test pixel extraction from time-series tile
+query I
+SELECT raquet_pixel(band_1, 'uint8', 0, 0, 2, 'none')
+FROM test_timeseries
+WHERE time_ts = '2000-01-01'
+----
+1.0
+
+query I
+SELECT raquet_pixel(band_1, 'uint8', 0, 0, 2, 'none')
+FROM test_timeseries
+WHERE time_ts = '2000-02-01'
+----
+5.0
+
+query I
+SELECT raquet_pixel(band_1, 'uint8', 0, 0, 2, 'none')
+FROM test_timeseries
+WHERE time_ts = '2001-01-01'
+----
+9.0
+
+# Test statistics for each time step
+query III
+SELECT
+    time_ts,
+    (ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).mean,
+    (ST_RasterSummaryStats(band_1, 'uint8', 2, 2, 'none')).sum
+FROM test_timeseries
+ORDER BY time_ts
+----
+2000-01-01 00:00:00	2.5	10.0
+2000-02-01 00:00:00	6.5	26.0
+2001-01-01 00:00:00	10.5	42.0
+
+# =============================================================================
+# Test NULL time_ts handling (for non-Gregorian calendars)
+# =============================================================================
+
+statement ok
+CREATE TABLE test_nongregorian AS
+SELECT
+    5192650370358181887::UBIGINT as block,
+    '{"time": {"cf:units": "days since 2000-01-01", "cf:calendar": "360_day"}}'::VARCHAR as metadata,
+    0.0::DOUBLE as time_cf,
+    NULL::TIMESTAMP as time_ts,  -- NULL for non-Gregorian
+    '\x01\x02\x03\x04'::BLOB as band_1
+
+# Verify NULL timestamp is handled correctly
+query IR
+SELECT time_cf, time_ts FROM test_nongregorian
+----
+0.0	NULL
+
+# CF time filtering still works when time_ts is NULL
+query I
+SELECT COUNT(*) FROM test_nongregorian WHERE time_cf = 0.0
+----
+1
+
+# =============================================================================
+# Cleanup
+# =============================================================================
+
+statement ok
+DROP TABLE test_timeseries
+
+statement ok
+DROP TABLE test_nongregorian
