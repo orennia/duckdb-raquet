@@ -28,12 +28,44 @@ This extension enables DuckDB to query Raquet files directly using SQL, with fun
 
 ## Installation
 
-### From Community Extensions (Coming Soon)
+### From Community Extensions (Coming with DuckDB 1.5)
 
 ```sql
 INSTALL raquet FROM community;
 LOAD raquet;
 ```
+
+### Self-Hosted (Current - DuckDB Development Build)
+
+The extension is currently available for DuckDB development builds. It requires the `-unsigned` flag since it's not signed by DuckDB.
+
+**From DuckDB CLI:**
+```bash
+duckdb -unsigned -c "
+SET custom_extension_repository = 'http://storage.googleapis.com/duckdb-raquet';
+INSTALL raquet;
+LOAD raquet;
+SELECT quadbin_from_tile(0, 0, 0);
+"
+```
+
+**From SQL:**
+```sql
+-- Allow unsigned extensions (required for self-hosted)
+SET allow_unsigned_extensions = true;
+
+-- Set custom repository
+SET custom_extension_repository = 'http://storage.googleapis.com/duckdb-raquet';
+
+-- Install and load
+INSTALL raquet;
+LOAD raquet;
+```
+
+**Currently supported platforms:**
+- `osx_arm64` (macOS Apple Silicon) - DuckDB dev build `42ba8038ab`
+
+*More platforms coming soon. For other platforms, build from source.*
 
 ### Building from Source
 
