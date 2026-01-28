@@ -3,9 +3,24 @@
 #include <string>
 #include <vector>
 #include <stdexcept>
+#include <cmath>
 
 namespace duckdb {
 namespace raquet {
+
+// Band info structure (v0.3.0 format)
+struct BandInfo {
+    std::string name;
+    std::string type;
+    double nodata;
+    bool has_nodata;
+
+    BandInfo() : nodata(0), has_nodata(false) {}
+    BandInfo(const std::string &n, const std::string &t)
+        : name(n), type(t), nodata(0), has_nodata(false) {}
+    BandInfo(const std::string &n, const std::string &t, double nd)
+        : name(n), type(t), nodata(nd), has_nodata(true) {}
+};
 
 // Parsed raquet metadata (v0.3.0 format)
 struct RaquetMetadata {
@@ -18,7 +33,8 @@ struct RaquetMetadata {
     int num_blocks;
     std::string scheme; // "quadbin"
     std::string crs;    // "EPSG:3857"
-    std::vector<std::pair<std::string, std::string>> bands;  // name -> type
+    std::vector<BandInfo> band_info;  // Full band info including nodata
+    std::vector<std::pair<std::string, std::string>> bands;  // name -> type (for backward compat)
 
     // Get band type by index (0-based) or name
     std::string get_band_type(int band_index) const {
@@ -35,6 +51,26 @@ struct RaquetMetadata {
             }
         }
         throw std::invalid_argument("Band not found: " + band_name);
+    }
+
+    // Get band info by index
+    const BandInfo& get_band_info(int band_index) const {
+        if (band_index < 0 || band_index >= static_cast<int>(band_info.size())) {
+            throw std::invalid_argument("Band index out of range");
+        }
+        return band_info[band_index];
+    }
+
+    // Check if a value is nodata for a band
+    bool is_nodata(int band_index, double value) const {
+        if (band_index < 0 || band_index >= static_cast<int>(band_info.size())) {
+            return false;
+        }
+        const auto &info = band_info[band_index];
+        if (!info.has_nodata) return false;
+        // Use exact comparison for integer types, approximate for float
+        return value == info.nodata ||
+               (std::isnan(value) && std::isnan(info.nodata));
     }
 };
 
@@ -85,6 +121,21 @@ inline int extract_json_int(const std::string &json, const std::string &key, int
     }
 }
 
+inline double extract_json_double(const std::string &json, const std::string &key, double default_val = 0.0) {
+    std::string val = extract_json_string(json, key);
+    if (val.empty() || val == "null") return default_val;
+    try {
+        return std::stod(val);
+    } catch (...) {
+        return default_val;
+    }
+}
+
+inline bool extract_json_has_value(const std::string &json, const std::string &key) {
+    std::string val = extract_json_string(json, key);
+    return !val.empty() && val != "null";
+}
+
 // Extract a nested JSON object as a string
 inline std::string extract_json_object(const std::string &json, const std::string &key) {
     std::string search = "\"" + key + "\":";
@@ -112,19 +163,22 @@ inline std::string extract_json_object(const std::string &json, const std::strin
     return json.substr(start, pos - start);
 }
 
-// Parse bands array from metadata JSON
-inline std::vector<std::pair<std::string, std::string>> parse_bands(const std::string &json) {
-    std::vector<std::pair<std::string, std::string>> bands;
+// Parse bands array from metadata JSON (returns both legacy format and full BandInfo)
+inline void parse_bands_full(const std::string &json,
+                             std::vector<std::pair<std::string, std::string>> &bands,
+                             std::vector<BandInfo> &band_info) {
+    bands.clear();
+    band_info.clear();
 
     // Find "bands": [...]
     size_t bands_pos = json.find("\"bands\":");
-    if (bands_pos == std::string::npos) return bands;
+    if (bands_pos == std::string::npos) return;
 
     size_t arr_start = json.find('[', bands_pos);
-    if (arr_start == std::string::npos) return bands;
+    if (arr_start == std::string::npos) return;
 
     size_t arr_end = json.find(']', arr_start);
-    if (arr_end == std::string::npos) return bands;
+    if (arr_end == std::string::npos) return;
 
     std::string bands_str = json.substr(arr_start + 1, arr_end - arr_start - 1);
 
@@ -144,11 +198,24 @@ inline std::vector<std::pair<std::string, std::string>> parse_bands(const std::s
 
         if (!name.empty() && !type.empty()) {
             bands.push_back({name, type});
+
+            BandInfo info(name, type);
+            if (extract_json_has_value(band_obj, "nodata")) {
+                info.nodata = extract_json_double(band_obj, "nodata", 0.0);
+                info.has_nodata = true;
+            }
+            band_info.push_back(info);
         }
 
         pos = obj_end + 1;
     }
+}
 
+// Legacy function for backward compatibility
+inline std::vector<std::pair<std::string, std::string>> parse_bands(const std::string &json) {
+    std::vector<std::pair<std::string, std::string>> bands;
+    std::vector<BandInfo> band_info;
+    parse_bands_full(json, bands, band_info);
     return bands;
 }
 
@@ -182,7 +249,7 @@ inline RaquetMetadata parse_metadata(const std::string &json) {
         meta.scheme = "quadbin";
     }
 
-    meta.bands = parse_bands(json);
+    parse_bands_full(json, meta.bands, meta.band_info);
 
     return meta;
 }

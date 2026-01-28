@@ -21,6 +21,8 @@ static bool ExtractGeometryBoundingBox(const string_t &geom, double &min_x, doub
     if (size < 5) return false;
 
     uint8_t byte_order = data[0];
+    // Valid WKB byte orders: 0 (big-endian) or 1 (little-endian)
+    if (byte_order > 1) return false;
     bool little_endian = (byte_order == 1);
 
     uint32_t geom_type;

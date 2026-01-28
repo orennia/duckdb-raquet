@@ -380,6 +380,7 @@ static void QuadbinResolutionFunction(DataChunk &args, ExpressionState &state, V
 // quadbin_to_bbox(cell) -> STRUCT(min_lon DOUBLE, min_lat DOUBLE, max_lon DOUBLE, max_lat DOUBLE)
 static void QuadbinToBboxFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     auto &cell_vec = args.data[0];
+    cell_vec.Flatten(args.size());  // Ensure vector is flat before accessing
 
     auto &struct_entries = StructVector::GetEntries(result);
     auto &min_lon_result = *struct_entries[0];
@@ -387,8 +388,10 @@ static void QuadbinToBboxFunction(DataChunk &args, ExpressionState &state, Vecto
     auto &max_lon_result = *struct_entries[2];
     auto &max_lat_result = *struct_entries[3];
 
+    auto cell_data = FlatVector::GetData<uint64_t>(cell_vec);
+
     for (idx_t i = 0; i < args.size(); i++) {
-        auto cell = FlatVector::GetData<uint64_t>(cell_vec)[i];
+        auto cell = cell_data[i];
 
         int x, y, z;
         quadbin::cell_to_tile(cell, x, y, z);
@@ -438,7 +441,7 @@ static void QuadbinPixelXYFunction(DataChunk &args, ExpressionState &state, Vect
 
 // quadbin_contains(cell, point_geometry) -> BOOLEAN
 // Check if a point geometry falls within the tile represented by cell
-// Requires DuckDB Spatial extension for GEOMETRY type
+// Uses DuckDB 1.5+ native GEOMETRY type
 static void QuadbinContainsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     args.data[0].Flatten(args.size());
     args.data[1].Flatten(args.size());
@@ -472,7 +475,7 @@ static void QuadbinContainsFunction(DataChunk &args, ExpressionState &state, Vec
 
 // quadbin_intersects(cell, geometry) -> BOOLEAN
 // Check if a tile intersects a geometry (uses bounding box of geometry)
-// Requires DuckDB Spatial extension for GEOMETRY type
+// Uses DuckDB 1.5+ native GEOMETRY type
 static void QuadbinIntersectsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     args.data[0].Flatten(args.size());
     args.data[1].Flatten(args.size());
@@ -533,6 +536,49 @@ static void STIntersectsFunction(DataChunk &args, ExpressionState &state, Vector
         }
 
         // Get tile bbox
+        int tile_x, tile_y, z;
+        quadbin::cell_to_tile(cell, tile_x, tile_y, z);
+
+        double tile_min_lon, tile_min_lat, tile_max_lon, tile_max_lat;
+        quadbin::tile_to_bbox_wgs84(tile_x, tile_y, z, tile_min_lon, tile_min_lat, tile_max_lon, tile_max_lat);
+
+        // Check for bbox intersection (fast O(1) comparison)
+        bool intersects = !(tile_max_lon < query_min_lon ||  // tile is left of query
+                           tile_min_lon > query_max_lon ||  // tile is right of query
+                           tile_max_lat < query_min_lat ||  // tile is below query
+                           tile_min_lat > query_max_lat);   // tile is above query
+
+        result_data[i] = intersects;
+    }
+}
+
+// ST_RasterIntersects(block, geometry) -> BOOLEAN
+// PostGIS-like API for raster tile intersection (alias for quadbin_intersects)
+// Semantics:
+//   - Block-level intersection only (tile/quadbin footprint, not pixel masking)
+//   - Operates in EPSG:4326 (quadbin space)
+//   - Input geometry is assumed to be in EPSG:4326
+//   - Returns TRUE if the tile's bounding box intersects the geometry's bbox
+// Note: This is the recommended function for WHERE clause filtering
+static void STRasterIntersectsFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+
+    auto cell_data = FlatVector::GetData<uint64_t>(args.data[0]);
+    auto geom_data = FlatVector::GetData<string_t>(args.data[1]);
+    auto result_data = FlatVector::GetData<bool>(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto cell = cell_data[i];
+        auto geom = geom_data[i];
+
+        double query_min_lon, query_min_lat, query_max_lon, query_max_lat;
+        if (!ExtractBoundingBox(geom, query_min_lon, query_min_lat, query_max_lon, query_max_lat)) {
+            throw InvalidInputException("ST_RasterIntersects: could not extract bounding box from geometry. "
+                                       "Geometry must be a POINT, POLYGON, or MULTIPOLYGON in EPSG:4326.");
+        }
+
+        // Get tile bbox in WGS84
         int tile_x, tile_y, z;
         quadbin::cell_to_tile(cell, tile_x, tile_y, z);
 
@@ -951,7 +997,7 @@ void RegisterQuadbinFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(pixel_xy);
 
     // ========================================================================
-    // Spatial Filtering Functions (require DuckDB Spatial extension)
+    // Spatial Filtering Functions (uses DuckDB 1.5+ native GEOMETRY type)
     // ========================================================================
 
     // quadbin_contains(cell, point_geometry) -> BOOLEAN
@@ -979,6 +1025,15 @@ void RegisterQuadbinFunctions(ExtensionLoader &loader) {
         LogicalType::BOOLEAN,
         STIntersectsFunction);
     loader.RegisterFunction(st_intersects);
+
+    // ST_RasterIntersects(block, geometry) -> BOOLEAN
+    // PostGIS-like API specifically for raster tile filtering
+    // Recommended for WHERE clauses: WHERE ST_RasterIntersects(block, geom)
+    ScalarFunction st_raster_intersects("ST_RasterIntersects",
+        {LogicalType::UBIGINT, LogicalType::GEOMETRY()},
+        LogicalType::BOOLEAN,
+        STRasterIntersectsFunction);
+    loader.RegisterFunction(st_raster_intersects);
 
     // ST_Contains(geometry, block) -> BOOLEAN
     // PostGIS-like API: geometry contains tile

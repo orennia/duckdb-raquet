@@ -198,19 +198,16 @@ true
 
 # =============================================================================
 # Test spatial filtering functions
-# Note: quadbin_contains, quadbin_intersects, ST_Intersects, and ST_Contains
-# require GEOMETRY type which needs the DuckDB Spatial extension to be loaded.
+# Note: These functions use DuckDB 1.5+ native GEOMETRY types.
+# Create geometries using WKT cast: 'POINT(-3.7 40.4)'::GEOMETRY
 #
-# Full spatial filtering tests should be run with:
-#   LOAD spatial;
-#
+# Example usage:
 #   -- Low-level quadbin functions:
-#   SELECT quadbin_contains(cell, ST_Point(-73.9857, 40.7484));
-#   SELECT quadbin_intersects(cell, ST_MakeEnvelope(-74.0, 40.7, -73.9, 40.8));
+#   SELECT quadbin_contains(cell, 'POINT(-73.9857 40.7484)'::GEOMETRY);
+#   SELECT quadbin_intersects(cell, 'POLYGON((-74.0 40.7, -73.9 40.7, -73.9 40.8, -74.0 40.8, -74.0 40.7))'::GEOMETRY);
 #
 #   -- PostGIS-like API (recommended for users):
-#   SELECT ST_Intersects(block, ST_GeomFromText('POLYGON((-74 40.7, -73.9 40.7, -73.9 40.8, -74 40.8, -74 40.7))'));
-#   SELECT ST_Contains(ST_GeomFromText('POLYGON((-80 35, -70 35, -70 45, -80 45, -80 35))'), block);
+#   SELECT ST_RasterIntersects(block, 'POLYGON((-74 40.7, -73.9 40.7, -73.9 40.8, -74 40.8, -74 40.7))'::GEOMETRY);
 #
 # Example usage with raquet files:
 #   SELECT ST_RegionStats(band_1, block, region_geom, metadata) as stats

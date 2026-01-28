@@ -233,9 +233,7 @@ statement ok
 DROP TABLE test_meta
 
 # =============================================================================
-# Note: ST_RasterValue and quadbin_contains/quadbin_intersects require
-# the DuckDB Spatial extension for GEOMETRY types.
-# Full spatial integration tests should be run with:
-#   LOAD spatial;
-#   -- Then test with ST_Point(), ST_MakeEnvelope(), etc.
+# Note: ST_RasterValue and quadbin_contains/quadbin_intersects use
+# DuckDB 1.5+ native GEOMETRY types. Create geometries using WKT cast:
+#   'POINT(-3.7 40.4)'::GEOMETRY
 # =============================================================================

@@ -24,7 +24,7 @@ This extension enables DuckDB to query Raquet files directly using SQL, with fun
 - **PostGIS-like Spatial Predicates** - `ST_Intersects`, `ST_Contains` for raster-vector operations
 - **Time-Series Support** - CF conventions for temporal rasters (NetCDF compatible)
 - **Cloud-Native** - Query remote Parquet files on S3/GCS with predicate pushdown
-- **DuckDB Spatial Integration** - Works with GEOMETRY types from DuckDB Spatial
+- **Native GEOMETRY Support** - Uses DuckDB 1.5+ native GEOMETRY types (no extensions required)
 
 ## Installation
 
@@ -414,21 +414,20 @@ WHERE quadbin_intersects_bbox(block, -74.1, 40.6, -73.8, 40.9)
   AND block != 0;
 ```
 
-### DuckDB Spatial Integration
+### Native GEOMETRY Support (DuckDB 1.5+)
 
 ```sql
-LOAD spatial;
 LOAD raquet;
 
 -- Convert QUADBIN cell to geometry for spatial operations
 SELECT
     block,
-    ST_GeomFromText(quadbin_to_wkt(block)) AS geom
+    quadbin_to_wkt(block)::GEOMETRY AS geom
 FROM dem
 WHERE block != 0
 LIMIT 5;
 
--- Or use the native GEOMETRY conversion
+-- Or use the native GEOMETRY conversion function
 SELECT
     block,
     ST_GeomFromQuadbin(block) AS geom
@@ -440,22 +439,23 @@ LIMIT 5;
 SELECT ST_RasterValue(
     r.block,
     r.band_1,
-    ST_Point(-73.9857, 40.7484),
+    'POINT(-73.9857 40.7484)'::GEOMETRY,
     metadata
 ) AS elevation
 FROM dem r
 WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
 ```
 
+> **Note on CRS and GEOGRAPHY**: Currently, raquet assumes input geometries are in **EPSG:4326** (WGS84 lon/lat) and raster data is in **EPSG:3857** (Web Mercator). Coordinate transformation is handled internally. Future versions of DuckDB (v1.5+) are expected to add [CRS type-level tracking](https://github.com/duckdb/duckdb-spatial/issues/441) and a native [GEOGRAPHY type](https://github.com/duckdb/duckdb-spatial/issues/376) for spherical operations. When available, raquet will be updated to leverage these capabilities for automatic CRS handling.
+
 ### Polygon Fill (Polyfill)
 
 ```sql
-LOAD spatial;
 LOAD raquet;
 
 -- Fill a polygon with QUADBIN cells at resolution 10
 SELECT unnest(quadbin_polyfill(
-    ST_GeomFromText('POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'),
+    'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY,
     10
 )) AS cell;
 
@@ -464,7 +464,7 @@ SELECT unnest(quadbin_polyfill(
 -- 'intersects': cells that intersect the polygon (complete coverage)
 -- 'contains': cells fully contained within the polygon (conservative)
 SELECT unnest(quadbin_polyfill(
-    ST_GeomFromText('POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'),
+    'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY,
     10,
     'intersects'
 )) AS cell;
@@ -473,23 +473,18 @@ SELECT unnest(quadbin_polyfill(
 ### Region Statistics
 
 ```sql
-LOAD spatial;
 LOAD raquet;
 
 -- Get aggregate statistics for pixels within a polygon region
--- First, get the metadata
-WITH meta AS (
-    SELECT metadata FROM read_parquet('dem.parquet') WHERE block = 0
-)
+-- Using read_raquet which automatically propagates metadata
 SELECT (ST_RegionStats(
     band_1,
     block,
-    ST_GeomFromText('POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'),
-    (SELECT metadata FROM meta)
+    'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY,
+    metadata
 )).*
-FROM read_parquet('dem.parquet')
-WHERE block != 0
-  AND ST_Intersects(block, ST_GeomFromText('POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'));
+FROM read_raquet('dem.parquet')
+WHERE ST_RasterIntersects(block, 'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY);
 -- Returns: count, sum, mean, min, max, stddev
 
 -- With nodata filtering
@@ -500,54 +495,43 @@ SELECT (ST_RegionStats(
     metadata,
     -9999.0  -- nodata value to exclude
 )).*
-FROM raster_data;
+FROM read_raquet('raster_data.parquet');
 ```
 
 ### PostGIS-like Spatial Predicates
 
 ```sql
-LOAD spatial;
 LOAD raquet;
 
 -- Find tiles that intersect a polygon (fast bbox check)
 SELECT block
-FROM dem
-WHERE ST_Intersects(block, ST_GeomFromText('POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'))
-  AND block != 0;
+FROM read_raquet('dem.parquet')
+WHERE ST_RasterIntersects(block, 'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY);
 
--- Find tiles fully contained within a polygon
+-- Find tiles that contain a specific point
 SELECT block
-FROM dem
-WHERE ST_Contains(
-    ST_GeomFromText('POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'),
-    block
-)
-  AND block != 0;
+FROM read_raquet('dem.parquet')
+WHERE quadbin_contains(block, 'POINT(-73.9857 40.7484)'::GEOMETRY);
 ```
 
 ### Clipping Rasters
 
 ```sql
-LOAD spatial;
 LOAD raquet;
 
 -- Extract pixel values within a polygon
-WITH meta AS (
-    SELECT metadata FROM read_parquet('dem.parquet') WHERE block = 0
-)
 SELECT
     block,
     ST_Clip(band_1, block,
-        ST_GeomFromText('POLYGON((-74.0 40.7, -73.9 40.7, -73.9 40.8, -74.0 40.8, -74.0 40.7))'),
-        (SELECT metadata FROM meta)
+        'POLYGON((-74.0 40.7, -73.9 40.7, -73.9 40.8, -74.0 40.8, -74.0 40.7))'::GEOMETRY,
+        metadata
     ) AS clipped_values
-FROM read_parquet('dem.parquet')
-WHERE block != 0
-  AND ST_Intersects(block, ST_GeomFromText('POLYGON((-74.0 40.7, -73.9 40.7, -73.9 40.8, -74.0 40.8, -74.0 40.7))'));
+FROM read_raquet('dem.parquet')
+WHERE ST_RasterIntersects(block, 'POLYGON((-74.0 40.7, -73.9 40.7, -73.9 40.8, -74.0 40.8, -74.0 40.7))'::GEOMETRY);
 
 -- Get full tile with outside pixels masked to nodata
 SELECT ST_ClipMask(band_1, block, clip_geom, metadata, -9999.0) AS masked_tile
-FROM raster_data;
+FROM read_raquet('raster_data.parquet');
 ```
 
 ### Band Math and Vegetation Indices

@@ -25,10 +25,18 @@ void RegisterMetadataFunctions(ExtensionLoader &loader);
 void RegisterRaquetTableFunctions(ExtensionLoader &loader);
 
 // Table macro definitions for read_raquet with spatial filtering overloads
+// v0.3.0 format: metadata is in a row where block=0, data rows have block!=0
+// These macros propagate the metadata to all data rows using REPLACE
 static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
-    // 1-arg: Basic read (unchanged behavior)
+    // 1-arg: Basic read - propagates metadata from metadata row to all data rows
     {DEFAULT_SCHEMA, "read_raquet", {"file", nullptr}, {{nullptr, nullptr}},
-     "SELECT * FROM read_parquet(file)"},
+     R"(
+        SELECT * REPLACE (
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0) AS metadata
+        )
+        FROM read_parquet(file)
+        WHERE block != 0
+     )"},
 
     // 2-arg: Spatial filter with auto-detected resolution
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", nullptr}, {{nullptr, nullptr}},
@@ -39,7 +47,10 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
             WHERE block != 0
             LIMIT 1
         )
-        SELECT * FROM read_parquet(file)
+        SELECT * REPLACE (
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0) AS metadata
+        )
+        FROM read_parquet(file)
         WHERE block IN (
             SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution)))
         )
@@ -49,7 +60,10 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
     // 3-arg: Spatial filter with explicit resolution
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", "resolution", nullptr}, {{nullptr, nullptr}},
      R"(
-        SELECT * FROM read_parquet(file)
+        SELECT * REPLACE (
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0) AS metadata
+        )
+        FROM read_parquet(file)
         WHERE block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution)))
           AND block != 0
      )"},

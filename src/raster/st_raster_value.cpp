@@ -10,11 +10,14 @@
 namespace duckdb {
 
 // ============================================================================
-// Geometry helpers - extract coordinates from GEOMETRY (WKB) type
+// Geometry helpers - extract coordinates from DuckDB's GEOMETRY type
 // ============================================================================
-
-// WKB Point format (21 bytes for 2D):
-// - 1 byte: byte order (01 = little-endian)
+//
+// DuckDB's native GEOMETRY type stores data as standard WKB (Well-Known Binary)
+// when created from WKT like 'POINT(x y)'::GEOMETRY.
+//
+// WKB POINT format (21 bytes for 2D):
+// - 1 byte: byte order (01 = little-endian, 00 = big-endian)
 // - 4 bytes: geometry type (1 = Point)
 // - 8 bytes: X coordinate (double)
 // - 8 bytes: Y coordinate (double)
@@ -25,59 +28,55 @@ static bool ExtractPointCoordinates(const string_t &geom, double &x, double &y) 
     const uint8_t *data = reinterpret_cast<const uint8_t*>(geom.GetData());
     idx_t size = geom.GetSize();
 
-    // Minimum size for a 2D WKB point: 1 + 4 + 8 + 8 = 21 bytes
-    if (size < 21) {
-        return false;
-    }
-
-    // Check byte order (we support both)
-    uint8_t byte_order = data[0];
-    bool little_endian = (byte_order == 1);
-
-    // Read geometry type
-    uint32_t geom_type;
-    if (little_endian) {
-        memcpy(&geom_type, data + 1, 4);
-    } else {
-        // Big endian - swap bytes
-        geom_type = (static_cast<uint32_t>(data[1]) << 24) |
-                    (static_cast<uint32_t>(data[2]) << 16) |
-                    (static_cast<uint32_t>(data[3]) << 8) |
-                    static_cast<uint32_t>(data[4]);
-    }
-
-    // Type 1 = Point, 0x80000001 = Point with SRID, 0x20000001 = PointZ, etc.
-    // We accept any point type (mask out the high bits for dimensionality flags)
-    uint32_t base_type = geom_type & 0xFF;
-    if (base_type != 1) {
-        return false;  // Not a point
-    }
-
-    // Check if there's an SRID (indicated by 0x20000000 flag in some WKB variants)
-    idx_t coord_offset = 5;
-    if (geom_type & 0x20000000) {
-        coord_offset += 4;  // Skip 4-byte SRID
-        if (size < coord_offset + 16) {
+    // Standard WKB format (21 bytes for 2D point)
+    if (size >= 21) {
+        uint8_t byte_order = data[0];
+        // Valid byte orders are 0 (big-endian) or 1 (little-endian)
+        if (byte_order > 1) {
             return false;
         }
-    }
+        bool little_endian = (byte_order == 1);
 
-    // Read coordinates
-    if (little_endian) {
-        memcpy(&x, data + coord_offset, 8);
-        memcpy(&y, data + coord_offset + 8, 8);
-    } else {
-        // Big endian - need to swap bytes for doubles
-        uint64_t x_bits, y_bits;
-        for (int i = 0; i < 8; i++) {
-            reinterpret_cast<uint8_t*>(&x_bits)[7-i] = data[coord_offset + i];
-            reinterpret_cast<uint8_t*>(&y_bits)[7-i] = data[coord_offset + 8 + i];
+        // Read geometry type
+        uint32_t geom_type;
+        if (little_endian) {
+            memcpy(&geom_type, data + 1, 4);
+        } else {
+            geom_type = (static_cast<uint32_t>(data[1]) << 24) |
+                        (static_cast<uint32_t>(data[2]) << 16) |
+                        (static_cast<uint32_t>(data[3]) << 8) |
+                        static_cast<uint32_t>(data[4]);
         }
-        memcpy(&x, &x_bits, 8);
-        memcpy(&y, &y_bits, 8);
+
+        // Type 1 = Point, also check for SRID variants
+        uint32_t base_type = geom_type & 0xFF;
+        if (base_type == 1) {
+            idx_t coord_offset = 5;
+            // Check for SRID flag (0x20000000 in EWKB)
+            if (geom_type & 0x20000000) {
+                coord_offset += 4;  // Skip 4-byte SRID
+                if (size < coord_offset + 16) {
+                    return false;
+                }
+            }
+
+            if (little_endian) {
+                memcpy(&x, data + coord_offset, 8);
+                memcpy(&y, data + coord_offset + 8, 8);
+            } else {
+                uint64_t x_bits, y_bits;
+                for (int i = 0; i < 8; i++) {
+                    reinterpret_cast<uint8_t*>(&x_bits)[7-i] = data[coord_offset + i];
+                    reinterpret_cast<uint8_t*>(&y_bits)[7-i] = data[coord_offset + 8 + i];
+                }
+                memcpy(&x, &x_bits, 8);
+                memcpy(&y, &y_bits, 8);
+            }
+            return true;
+        }
     }
 
-    return true;
+    return false;
 }
 
 // ============================================================================
@@ -313,7 +312,30 @@ static void RaquetPixelWithMetadataAndBandFunction(DataChunk &args, ExpressionSt
 }
 
 // ============================================================================
-// GEOMETRY-based ST_RasterValue functions (requires DuckDB Spatial extension)
+// GEOMETRY-based ST_RasterValue functions (uses DuckDB 1.5+ native GEOMETRY)
+// ============================================================================
+//
+// ST_RasterValue(block, band, geometry, metadata) -> DOUBLE
+//
+// PostGIS-like API for extracting raster pixel values at a point.
+//
+// Semantics:
+//   - Input geometry must be a POINT in EPSG:4326 (WGS84 lon/lat)
+//   - Internally transforms to EPSG:3857 for pixel lookup (rasters are WebMercator)
+//   - Returns NULL if:
+//     * Point falls outside the block's spatial extent
+//     * Sampled pixel equals the band's NODATA value
+//     * Band data is empty
+//   - Resampling: nearest neighbor (default, bilinear can be added later)
+//
+// Execution model:
+//   - Use ST_RasterIntersects(block, geom) for block pruning in WHERE clause
+//   - ST_RasterValue is only evaluated after pruning (blocks are not decoded unnecessarily)
+//
+// Example:
+//   SELECT ST_RasterValue(block, band_1, ST_Point(-3.7, 40.4), metadata)
+//   FROM read_raquet('file.parquet')
+//   WHERE ST_RasterIntersects(block, ST_Point(-3.7, 40.4));
 // ============================================================================
 
 // ST_RasterValue(block UBIGINT, band BLOB, point GEOMETRY, metadata VARCHAR) -> DOUBLE
@@ -342,10 +364,10 @@ static void STRasterValueWithGeometryFunction(DataChunk &args, ExpressionState &
             continue;
         }
 
-        // Extract lon/lat from point geometry
+        // Extract lon/lat from point geometry (assumed EPSG:4326)
         double lon, lat;
         if (!ExtractPointCoordinates(geom, lon, lat)) {
-            throw InvalidInputException("ST_RasterValue: geometry must be a POINT");
+            throw InvalidInputException("ST_RasterValue: geometry must be a POINT in EPSG:4326");
         }
 
         try {
@@ -361,16 +383,25 @@ static void STRasterValueWithGeometryFunction(DataChunk &args, ExpressionState &
             int pixel_x, pixel_y, calc_tile_x, calc_tile_y;
             quadbin::lonlat_to_pixel(lon, lat, resolution, tile_size, pixel_x, pixel_y, calc_tile_x, calc_tile_y);
 
+            // Return NULL if point falls outside this block
             if (calc_tile_x != tile_x || calc_tile_y != tile_y) {
                 result_mask.SetInvalid(i);
                 continue;
             }
 
-            result_data[i] = raquet::decode_pixel(
+            double value = raquet::decode_pixel(
                 reinterpret_cast<const uint8_t*>(band.GetData()),
                 band.GetSize(),
                 dtype, pixel_x, pixel_y, tile_size, compressed
             );
+
+            // Check for NODATA value and return NULL if matched
+            if (!meta.band_info.empty() && meta.is_nodata(0, value)) {
+                result_mask.SetInvalid(i);
+                continue;
+            }
+
+            result_data[i] = value;
         } catch (const std::exception &e) {
             throw InvalidInputException("ST_RasterValue error: %s", e.what());
         }
@@ -378,7 +409,7 @@ static void STRasterValueWithGeometryFunction(DataChunk &args, ExpressionState &
 }
 
 // ST_RasterValue(block UBIGINT, band BLOB, point GEOMETRY, metadata VARCHAR, band_index INT) -> DOUBLE
-// Get pixel value at point geometry with explicit band index
+// Get pixel value at point geometry with explicit band index (for multi-band rasters)
 static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     args.data[0].Flatten(args.size());
     args.data[1].Flatten(args.size());
@@ -406,9 +437,10 @@ static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, Expression
             continue;
         }
 
+        // Extract lon/lat from point geometry (assumed EPSG:4326)
         double lon, lat;
         if (!ExtractPointCoordinates(geom, lon, lat)) {
-            throw InvalidInputException("ST_RasterValue: geometry must be a POINT");
+            throw InvalidInputException("ST_RasterValue: geometry must be a POINT in EPSG:4326");
         }
 
         try {
@@ -424,16 +456,25 @@ static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, Expression
             int pixel_x, pixel_y, calc_tile_x, calc_tile_y;
             quadbin::lonlat_to_pixel(lon, lat, resolution, tile_size, pixel_x, pixel_y, calc_tile_x, calc_tile_y);
 
+            // Return NULL if point falls outside this block
             if (calc_tile_x != tile_x || calc_tile_y != tile_y) {
                 result_mask.SetInvalid(i);
                 continue;
             }
 
-            result_data[i] = raquet::decode_pixel(
+            double value = raquet::decode_pixel(
                 reinterpret_cast<const uint8_t*>(band.GetData()),
                 band.GetSize(),
                 dtype, pixel_x, pixel_y, tile_size, compressed
             );
+
+            // Check for NODATA value and return NULL if matched
+            if (band_idx < static_cast<int32_t>(meta.band_info.size()) && meta.is_nodata(band_idx, value)) {
+                result_mask.SetInvalid(i);
+                continue;
+            }
+
+            result_data[i] = value;
         } catch (const std::exception &e) {
             throw InvalidInputException("ST_RasterValue error: %s", e.what());
         }
@@ -477,7 +518,7 @@ void RegisterRasterValueFunctions(ExtensionLoader &loader) {
     loader.RegisterFunction(pixel_meta_band_fn);
 
     // ========================================================================
-    // GEOMETRY type functions (requires DuckDB Spatial extension)
+    // GEOMETRY type functions (uses DuckDB 1.5+ native GEOMETRY)
     // ========================================================================
 
     // ST_RasterValue(block, band, point_geometry, metadata) -> DOUBLE
