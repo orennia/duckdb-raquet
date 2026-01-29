@@ -149,8 +149,8 @@ BandStats compute_band_stats(const uint8_t *band_data, size_t band_size,
     for (size_t i = 0; i < pixel_count; i++) {
         double val = get_pixel_value(data, i, dtype);
 
-        // Skip nodata values
-        if (has_nodata && val == nodata) {
+        // Skip nodata values (handle NaN specially since NaN != NaN)
+        if (has_nodata && (val == nodata || (std::isnan(val) && std::isnan(nodata)))) {
             continue;
         }
 

@@ -34,6 +34,7 @@ static void STRasterSummaryStatsFunction(DataChunk &args, ExpressionState &state
     auto nodata_data = FlatVector::GetData<double>(nodata_vec);
 
     auto &band_validity = FlatVector::Validity(band_vec);
+    auto &nodata_validity = FlatVector::Validity(nodata_vec);
 
     auto &struct_entries = StructVector::GetEntries(result);
     auto count_data = FlatVector::GetData<int64_t>(*struct_entries[0]);
@@ -65,7 +66,8 @@ static void STRasterSummaryStatsFunction(DataChunk &args, ExpressionState &state
         auto nodata = nodata_data[i];
 
         bool compressed = (compression == "gzip");
-        bool has_nodata = !std::isnan(nodata);
+        // Support NaN as a valid nodata value (Zarr v3 convention)
+        bool has_nodata = nodata_validity.RowIsValid(i);
 
         try {
             // Use streaming stats for better performance (avoids allocating full pixel array)

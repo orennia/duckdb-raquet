@@ -4,6 +4,7 @@
 #include <vector>
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 
 namespace duckdb {
 namespace raquet {
@@ -24,6 +25,7 @@ struct BandInfo {
 
 // Parsed raquet metadata (v0.3.0 format)
 struct RaquetMetadata {
+    std::string file_format;  // new in v0.3.0: should be "raquet"
     std::string compression;
     int block_width;
     int block_height;
@@ -136,6 +138,33 @@ inline bool extract_json_has_value(const std::string &json, const std::string &k
     return !val.empty() && val != "null";
 }
 
+// Parse nodata value handling Zarr v3 string conventions:
+// - "NaN" -> NaN
+// - "Infinity" -> +Infinity
+// - "-Infinity" -> -Infinity
+// - numeric values as-is
+inline double parse_nodata_value(const std::string &val) {
+    if (val.empty() || val == "null") {
+        return 0.0;
+    }
+    // Handle Zarr v3 string conventions (case-sensitive per spec)
+    if (val == "NaN") {
+        return std::nan("");
+    }
+    if (val == "Infinity") {
+        return std::numeric_limits<double>::infinity();
+    }
+    if (val == "-Infinity") {
+        return -std::numeric_limits<double>::infinity();
+    }
+    // Try to parse as numeric
+    try {
+        return std::stod(val);
+    } catch (...) {
+        return 0.0;
+    }
+}
+
 // Extract a nested JSON object as a string
 inline std::string extract_json_object(const std::string &json, const std::string &key) {
     std::string search = "\"" + key + "\":";
@@ -201,7 +230,9 @@ inline void parse_bands_full(const std::string &json,
 
             BandInfo info(name, type);
             if (extract_json_has_value(band_obj, "nodata")) {
-                info.nodata = extract_json_double(band_obj, "nodata", 0.0);
+                // Use parse_nodata_value to handle Zarr v3 string conventions
+                std::string nodata_str = extract_json_string(band_obj, "nodata");
+                info.nodata = parse_nodata_value(nodata_str);
                 info.has_nodata = true;
             }
             band_info.push_back(info);
@@ -222,6 +253,9 @@ inline std::vector<std::pair<std::string, std::string>> parse_bands(const std::s
 // Parse metadata JSON string (v0.3.0 format)
 inline RaquetMetadata parse_metadata(const std::string &json) {
     RaquetMetadata meta;
+
+    // New in v0.3.0: file_format identifier
+    meta.file_format = extract_json_string(json, "file_format");
 
     meta.compression = extract_json_string(json, "compression");
     if (meta.compression.empty()) meta.compression = "none";
