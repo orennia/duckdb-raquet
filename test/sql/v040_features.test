@@ -1,0 +1,149 @@
+# name: test/sql/v040_features.test
+# description: Test RaQuet v0.4.0 spec features (interleaved layout, lossy compression)
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test metadata parsing for v0.4.0 fields
+# =============================================================================
+
+# Test parsing metadata with band_layout: interleaved
+statement ok
+CREATE TABLE test_metadata_interleaved AS
+SELECT '{"file_format":"raquet","compression":"gzip","band_layout":"interleaved","crs":"EPSG:3857","tiling":{"min_zoom":0,"max_zoom":10,"pixel_zoom":8,"block_width":256,"block_height":256,"scheme":"quadbin","num_blocks":100},"bands":[{"name":"red","type":"uint8"},{"name":"green","type":"uint8"},{"name":"blue","type":"uint8"}]}'::VARCHAR as metadata
+
+query I
+SELECT (raquet_parse_metadata(metadata)).band_layout FROM test_metadata_interleaved
+----
+interleaved
+
+statement ok
+DROP TABLE test_metadata_interleaved
+
+# Test parsing metadata with JPEG compression
+statement ok
+CREATE TABLE test_metadata_jpeg AS
+SELECT '{"file_format":"raquet","compression":"jpeg","compression_quality":85,"band_layout":"interleaved","crs":"EPSG:3857","tiling":{"min_zoom":0,"max_zoom":10,"block_width":256,"block_height":256,"scheme":"quadbin","num_blocks":100},"bands":[{"name":"red","type":"uint8"},{"name":"green","type":"uint8"},{"name":"blue","type":"uint8"}]}'::VARCHAR as metadata
+
+query II
+SELECT (raquet_parse_metadata(metadata)).compression,
+       (raquet_parse_metadata(metadata)).compression_quality
+FROM test_metadata_jpeg
+----
+jpeg	85
+
+statement ok
+DROP TABLE test_metadata_jpeg
+
+# Test parsing metadata with WebP compression
+statement ok
+CREATE TABLE test_metadata_webp AS
+SELECT '{"file_format":"raquet","compression":"webp","compression_quality":90,"band_layout":"interleaved","crs":"EPSG:3857","tiling":{"min_zoom":0,"max_zoom":10,"block_width":256,"block_height":256,"scheme":"quadbin","num_blocks":100},"bands":[{"name":"red","type":"uint8"},{"name":"green","type":"uint8"},{"name":"blue","type":"uint8"}]}'::VARCHAR as metadata
+
+query II
+SELECT (raquet_parse_metadata(metadata)).compression,
+       (raquet_parse_metadata(metadata)).compression_quality
+FROM test_metadata_webp
+----
+webp	90
+
+statement ok
+DROP TABLE test_metadata_webp
+
+# Test default band_layout (should be "sequential")
+statement ok
+CREATE TABLE test_metadata_default_layout AS
+SELECT '{"file_format":"raquet","compression":"gzip","crs":"EPSG:3857","tiling":{"min_zoom":0,"max_zoom":10,"block_width":256,"block_height":256,"scheme":"quadbin","num_blocks":100},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+query I
+SELECT (raquet_parse_metadata(metadata)).band_layout FROM test_metadata_default_layout
+----
+sequential
+
+statement ok
+DROP TABLE test_metadata_default_layout
+
+# =============================================================================
+# Test interleaved (BIP) pixel extraction with uncompressed data
+# =============================================================================
+
+# Create a 2x2 RGB tile with uncompressed interleaved data
+# Pixel layout (BIP): R0,G0,B0, R1,G1,B1, R2,G2,B2, R3,G3,B3
+# Values: (100,110,120), (101,111,121), (102,112,122), (103,113,123)
+statement ok
+CREATE TABLE test_interleaved_uncompressed AS
+SELECT
+    1::UBIGINT as block,
+    -- 2x2 RGB interleaved: 12 bytes total
+    '\x64\x6E\x78\x65\x6F\x79\x66\x70\x7A\x67\x71\x7B'::BLOB as pixels,
+    '{"file_format":"raquet","compression":"none","band_layout":"interleaved","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"red","type":"uint8"},{"name":"green","type":"uint8"},{"name":"blue","type":"uint8"}]}'::VARCHAR as metadata
+
+# Extract red channel (band 0) at pixel (0,0) -> should be 100
+query I
+SELECT raquet_pixel_interleaved(pixels, metadata, 0, 0, 0) FROM test_interleaved_uncompressed
+----
+100.0
+
+# Extract green channel (band 1) at pixel (0,0) -> should be 110
+query I
+SELECT raquet_pixel_interleaved(pixels, metadata, 1, 0, 0) FROM test_interleaved_uncompressed
+----
+110.0
+
+# Extract blue channel (band 2) at pixel (0,0) -> should be 120
+query I
+SELECT raquet_pixel_interleaved(pixels, metadata, 2, 0, 0) FROM test_interleaved_uncompressed
+----
+120.0
+
+# Extract red at (1,0) -> should be 101
+query I
+SELECT raquet_pixel_interleaved(pixels, metadata, 0, 1, 0) FROM test_interleaved_uncompressed
+----
+101.0
+
+# Extract green at (0,1) -> should be 112
+query I
+SELECT raquet_pixel_interleaved(pixels, metadata, 1, 0, 1) FROM test_interleaved_uncompressed
+----
+112.0
+
+# Extract blue at (1,1) -> should be 123
+query I
+SELECT raquet_pixel_interleaved(pixels, metadata, 2, 1, 1) FROM test_interleaved_uncompressed
+----
+123.0
+
+statement ok
+DROP TABLE test_interleaved_uncompressed
+
+# =============================================================================
+# Test interleaved with gzip compression
+# =============================================================================
+
+# Note: For a real test, we'd need gzip-compressed data
+# This test verifies the metadata parsing and function registration
+
+# Test that band_layout: "sequential" still works with regular functions
+statement ok
+CREATE TABLE test_sequential_metadata AS
+SELECT
+    1::UBIGINT as block,
+    -- 2x2 uint8 sequential band
+    '\x64\x65\x66\x67'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","band_layout":"sequential","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# Regular pixel function should still work
+query I
+SELECT raquet_pixel(band_1, 'uint8', 0, 0, 2, 'none') FROM test_sequential_metadata
+----
+100.0
+
+query I
+SELECT raquet_pixel(band_1, 'uint8', 1, 1, 2, 'none') FROM test_sequential_metadata
+----
+103.0
+
+statement ok
+DROP TABLE test_sequential_metadata

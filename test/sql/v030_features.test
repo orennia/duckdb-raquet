@@ -1,0 +1,216 @@
+# name: test/sql/v030_features.test
+# description: Test RaQuet v0.3.0 spec features
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test float16 data type support
+# =============================================================================
+
+# Test float16 with value 1.0 (IEEE 754 half-precision: 0x3C00)
+# Binary: 0011 1100 0000 0000
+# Sign: 0, Exponent: 01111 (15 = bias), Mantissa: 0000000000
+statement ok
+CREATE TABLE test_float16 AS
+SELECT
+    1::UBIGINT as block,
+    -- Single float16 value: 1.0 = 0x3C00 (little-endian: 00 3C)
+    '\x00\x3C'::BLOB as band_1
+
+query I
+SELECT raquet_pixel(band_1, 'float16', 0, 0, 1, 'none') FROM test_float16
+----
+1.0
+
+statement ok
+DROP TABLE test_float16
+
+# Test float16 with value 3.5 (0x4300 = 0100 0011 0000 0000)
+# Sign: 0, Exponent: 10000 (16), Mantissa: 1100000000 (0.75)
+# Value: (1 + 0.75) * 2^(16-15) = 1.75 * 2 = 3.5
+statement ok
+CREATE TABLE test_float16_2 AS
+SELECT
+    1::UBIGINT as block,
+    -- float16 value 3.5 = 0x4300 (little-endian: 00 43)
+    '\x00\x43'::BLOB as band_1
+
+query I
+SELECT raquet_pixel(band_1, 'float16', 0, 0, 1, 'none') FROM test_float16_2
+----
+3.5
+
+statement ok
+DROP TABLE test_float16_2
+
+# Test float16 with negative value -2.0 (0xC000)
+# Sign: 1, Exponent: 10000 (16), Mantissa: 0000000000
+# Value: -1 * (1 + 0) * 2^(16-15) = -2.0
+statement ok
+CREATE TABLE test_float16_neg AS
+SELECT
+    1::UBIGINT as block,
+    -- float16 value -2.0 = 0xC000 (little-endian: 00 C0)
+    '\x00\xC0'::BLOB as band_1
+
+query I
+SELECT raquet_pixel(band_1, 'float16', 0, 0, 1, 'none') FROM test_float16_neg
+----
+-2.0
+
+statement ok
+DROP TABLE test_float16_neg
+
+# Test float16 zero (0x0000)
+statement ok
+CREATE TABLE test_float16_zero AS
+SELECT
+    1::UBIGINT as block,
+    '\x00\x00'::BLOB as band_1
+
+query I
+SELECT raquet_pixel(band_1, 'float16', 0, 0, 1, 'none') FROM test_float16_zero
+----
+0.0
+
+statement ok
+DROP TABLE test_float16_zero
+
+# Test float16 infinity (0x7C00)
+statement ok
+CREATE TABLE test_float16_inf AS
+SELECT
+    1::UBIGINT as block,
+    -- float16 +infinity = 0x7C00 (little-endian: 00 7C)
+    '\x00\x7C'::BLOB as band_1
+
+query I
+SELECT raquet_pixel(band_1, 'float16', 0, 0, 1, 'none') FROM test_float16_inf
+----
+inf
+
+statement ok
+DROP TABLE test_float16_inf
+
+# =============================================================================
+# Test string nodata encoding (Zarr v3 conventions)
+# =============================================================================
+
+# Test parsing metadata with NaN nodata (string encoded)
+statement ok
+CREATE TABLE test_nodata_nan AS
+SELECT '{"file_format":"raquet","compression":"none","crs":"EPSG:3857","tiling":{"min_zoom":0,"max_zoom":10,"pixel_zoom":8,"block_width":256,"block_height":256,"scheme":"quadbin","num_blocks":100},"bands":[{"name":"band_1","type":"float32","nodata":"NaN"}]}'::VARCHAR as metadata
+
+query I
+SELECT (raquet_parse_metadata(metadata)).compression FROM test_nodata_nan
+----
+none
+
+statement ok
+DROP TABLE test_nodata_nan
+
+# Test parsing metadata with Infinity nodata
+statement ok
+CREATE TABLE test_nodata_inf AS
+SELECT '{"file_format":"raquet","compression":"gzip","crs":"EPSG:4326","tiling":{"min_zoom":5,"max_zoom":15,"block_width":512,"block_height":512,"scheme":"quadbin","num_blocks":50},"bands":[{"name":"elevation","type":"float64","nodata":"Infinity"}]}'::VARCHAR as metadata
+
+query I
+SELECT (raquet_parse_metadata(metadata)).compression FROM test_nodata_inf
+----
+gzip
+
+statement ok
+DROP TABLE test_nodata_inf
+
+# Test parsing metadata with -Infinity nodata
+statement ok
+CREATE TABLE test_nodata_neginf AS
+SELECT '{"file_format":"raquet","compression":"none","crs":"EPSG:3857","tiling":{"min_zoom":0,"max_zoom":12,"block_width":256,"block_height":256,"scheme":"quadbin","num_blocks":200},"bands":[{"name":"temp","type":"float32","nodata":"-Infinity"}]}'::VARCHAR as metadata
+
+query I
+SELECT (raquet_parse_metadata(metadata)).min_zoom FROM test_nodata_neginf
+----
+0
+
+statement ok
+DROP TABLE test_nodata_neginf
+
+# =============================================================================
+# Test file_format field parsing
+# =============================================================================
+
+# Test metadata with file_format field
+statement ok
+CREATE TABLE test_file_format AS
+SELECT '{"file_format":"raquet","compression":"gzip","crs":"EPSG:3857","tiling":{"min_zoom":2,"max_zoom":18,"pixel_zoom":10,"block_width":256,"block_height":256,"scheme":"quadbin","num_blocks":1000},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+query I
+SELECT (raquet_parse_metadata(metadata)).max_zoom FROM test_file_format
+----
+18
+
+statement ok
+DROP TABLE test_file_format
+
+# Test with numeric nodata (backward compatibility)
+statement ok
+CREATE TABLE test_nodata_numeric AS
+SELECT '{"file_format":"raquet","compression":"none","tiling":{"min_zoom":0,"max_zoom":10,"block_width":256,"block_height":256,"scheme":"quadbin"},"bands":[{"name":"band_1","type":"int16","nodata":-9999}]}'::VARCHAR as metadata
+
+query I
+SELECT (raquet_parse_metadata(metadata)).block_width FROM test_nodata_numeric
+----
+256
+
+statement ok
+DROP TABLE test_nodata_numeric
+
+# =============================================================================
+# Test NaN nodata in ST_RasterSummaryStats
+# =============================================================================
+
+# Test stats WITH NaN as nodata value (should skip NaN pixels)
+# float16 values: 1.0, NaN, 2.0, 3.0
+statement ok
+CREATE TABLE test_stats_nan AS
+SELECT
+    1::UBIGINT as block,
+    '\x00\x3C\x00\x7E\x00\x40\x00\x42'::BLOB as band_1
+
+# With NaN nodata: count=3, sum=6.0, mean=2.0
+query III
+SELECT
+    (ST_RasterSummaryStats(band_1, 'float16', 2, 2, 'none', 'NaN'::DOUBLE)).count,
+    (ST_RasterSummaryStats(band_1, 'float16', 2, 2, 'none', 'NaN'::DOUBLE)).sum,
+    (ST_RasterSummaryStats(band_1, 'float16', 2, 2, 'none', 'NaN'::DOUBLE)).mean
+FROM test_stats_nan
+----
+3	6.0	2.0
+
+statement ok
+DROP TABLE test_stats_nan
+
+# =============================================================================
+# Test Infinity nodata in ST_RasterSummaryStats
+# =============================================================================
+
+# float16 values: 1.0, +inf, 2.0, 3.0
+statement ok
+CREATE TABLE test_stats_inf AS
+SELECT
+    1::UBIGINT as block,
+    '\x00\x3C\x00\x7C\x00\x40\x00\x42'::BLOB as band_1
+
+# With Infinity nodata: count=3, sum=6.0, mean=2.0
+query III
+SELECT
+    (ST_RasterSummaryStats(band_1, 'float16', 2, 2, 'none', 'Infinity'::DOUBLE)).count,
+    (ST_RasterSummaryStats(band_1, 'float16', 2, 2, 'none', 'Infinity'::DOUBLE)).sum,
+    (ST_RasterSummaryStats(band_1, 'float16', 2, 2, 'none', 'Infinity'::DOUBLE)).mean
+FROM test_stats_inf
+----
+3	6.0	2.0
+
+statement ok
+DROP TABLE test_stats_inf

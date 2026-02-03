@@ -38,11 +38,13 @@ static void RaquetParseMetadataFunction(DataChunk &args, ExpressionState &state,
 
     auto &struct_entries = StructVector::GetEntries(result);
     auto &compression_vec = *struct_entries[0];
-    auto &block_width_vec = *struct_entries[1];
-    auto &block_height_vec = *struct_entries[2];
-    auto &min_zoom_vec = *struct_entries[3];
-    auto &max_zoom_vec = *struct_entries[4];
-    auto &num_bands_vec = *struct_entries[5];
+    auto &compression_quality_vec = *struct_entries[1];  // v0.4.0
+    auto &band_layout_vec = *struct_entries[2];          // v0.4.0
+    auto &block_width_vec = *struct_entries[3];
+    auto &block_height_vec = *struct_entries[4];
+    auto &min_zoom_vec = *struct_entries[5];
+    auto &max_zoom_vec = *struct_entries[6];
+    auto &num_bands_vec = *struct_entries[7];
 
     for (idx_t i = 0; i < args.size(); i++) {
         auto metadata_str = metadata_data[i].GetString();
@@ -56,6 +58,8 @@ static void RaquetParseMetadataFunction(DataChunk &args, ExpressionState &state,
             auto meta = raquet::parse_metadata(metadata_str);
 
             FlatVector::GetData<string_t>(compression_vec)[i] = StringVector::AddString(compression_vec, meta.compression);
+            FlatVector::GetData<int32_t>(compression_quality_vec)[i] = meta.compression_quality;
+            FlatVector::GetData<string_t>(band_layout_vec)[i] = StringVector::AddString(band_layout_vec, meta.band_layout);
             FlatVector::GetData<int32_t>(block_width_vec)[i] = meta.block_width;
             FlatVector::GetData<int32_t>(block_height_vec)[i] = meta.block_height;
             FlatVector::GetData<int32_t>(min_zoom_vec)[i] = meta.min_zoom;
@@ -166,9 +170,11 @@ void RegisterRaquetTableFunctions(ExtensionLoader &loader) {
     // Scalar helper functions
     // =========================================================================
 
-    // raquet_parse_metadata(metadata) -> STRUCT (v0.3.0 format)
+    // raquet_parse_metadata(metadata) -> STRUCT (v0.4.0 format)
     child_list_t<LogicalType> meta_struct;
     meta_struct.push_back(make_pair("compression", LogicalType::VARCHAR));
+    meta_struct.push_back(make_pair("compression_quality", LogicalType::INTEGER));  // v0.4.0
+    meta_struct.push_back(make_pair("band_layout", LogicalType::VARCHAR));          // v0.4.0
     meta_struct.push_back(make_pair("block_width", LogicalType::INTEGER));
     meta_struct.push_back(make_pair("block_height", LogicalType::INTEGER));
     meta_struct.push_back(make_pair("min_zoom", LogicalType::INTEGER));

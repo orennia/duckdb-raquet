@@ -4,6 +4,7 @@
 #include <vector>
 #include <stdexcept>
 #include <cmath>
+#include <limits>
 
 namespace duckdb {
 namespace raquet {
@@ -22,9 +23,12 @@ struct BandInfo {
         : name(n), type(t), nodata(nd), has_nodata(true) {}
 };
 
-// Parsed raquet metadata (v0.3.0 format)
+// Parsed raquet metadata (v0.4.0 format)
 struct RaquetMetadata {
+    std::string file_format;  // new in v0.3.0: should be "raquet"
     std::string compression;
+    int compression_quality;  // new in v0.4.0: JPEG/WebP quality (1-100), 0 if not specified
+    std::string band_layout;  // new in v0.4.0: "sequential" (default) or "interleaved"
     int block_width;
     int block_height;
     int min_zoom;       // was minresolution
@@ -71,6 +75,21 @@ struct RaquetMetadata {
         // Use exact comparison for integer types, approximate for float
         return value == info.nodata ||
                (std::isnan(value) && std::isnan(info.nodata));
+    }
+
+    // v0.4.0: Check if band layout is interleaved
+    bool is_interleaved() const {
+        return band_layout == "interleaved";
+    }
+
+    // v0.4.0: Check if compression is lossy (JPEG/WebP)
+    bool is_lossy_compression() const {
+        return compression == "jpeg" || compression == "webp";
+    }
+
+    // v0.4.0: Get the number of bands
+    int num_bands() const {
+        return static_cast<int>(bands.size());
     }
 };
 
@@ -134,6 +153,33 @@ inline double extract_json_double(const std::string &json, const std::string &ke
 inline bool extract_json_has_value(const std::string &json, const std::string &key) {
     std::string val = extract_json_string(json, key);
     return !val.empty() && val != "null";
+}
+
+// Parse nodata value handling Zarr v3 string conventions:
+// - "NaN" -> NaN
+// - "Infinity" -> +Infinity
+// - "-Infinity" -> -Infinity
+// - numeric values as-is
+inline double parse_nodata_value(const std::string &val) {
+    if (val.empty() || val == "null") {
+        return 0.0;
+    }
+    // Handle Zarr v3 string conventions (case-sensitive per spec)
+    if (val == "NaN") {
+        return std::nan("");
+    }
+    if (val == "Infinity") {
+        return std::numeric_limits<double>::infinity();
+    }
+    if (val == "-Infinity") {
+        return -std::numeric_limits<double>::infinity();
+    }
+    // Try to parse as numeric
+    try {
+        return std::stod(val);
+    } catch (...) {
+        return 0.0;
+    }
 }
 
 // Extract a nested JSON object as a string
@@ -201,7 +247,9 @@ inline void parse_bands_full(const std::string &json,
 
             BandInfo info(name, type);
             if (extract_json_has_value(band_obj, "nodata")) {
-                info.nodata = extract_json_double(band_obj, "nodata", 0.0);
+                // Use parse_nodata_value to handle Zarr v3 string conventions
+                std::string nodata_str = extract_json_string(band_obj, "nodata");
+                info.nodata = parse_nodata_value(nodata_str);
                 info.has_nodata = true;
             }
             band_info.push_back(info);
@@ -219,12 +267,22 @@ inline std::vector<std::pair<std::string, std::string>> parse_bands(const std::s
     return bands;
 }
 
-// Parse metadata JSON string (v0.3.0 format)
+// Parse metadata JSON string (v0.4.0 format)
 inline RaquetMetadata parse_metadata(const std::string &json) {
     RaquetMetadata meta;
 
+    // New in v0.3.0: file_format identifier
+    meta.file_format = extract_json_string(json, "file_format");
+
     meta.compression = extract_json_string(json, "compression");
     if (meta.compression.empty()) meta.compression = "none";
+
+    // New in v0.4.0: compression quality for JPEG/WebP
+    meta.compression_quality = extract_json_int(json, "compression_quality", 0);
+
+    // New in v0.4.0: band layout (sequential or interleaved)
+    meta.band_layout = extract_json_string(json, "band_layout");
+    if (meta.band_layout.empty()) meta.band_layout = "sequential";
 
     meta.crs = extract_json_string(json, "crs");
 

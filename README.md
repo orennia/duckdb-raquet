@@ -25,6 +25,8 @@ This extension enables DuckDB to query Raquet files directly using SQL, with fun
 - **Time-Series Support** - CF conventions for temporal rasters (NetCDF compatible)
 - **Cloud-Native** - Query remote Parquet files on S3/GCS with predicate pushdown
 - **Native GEOMETRY Support** - Uses DuckDB 1.5+ native GEOMETRY types (no extensions required)
+- **Interleaved Band Layout** - v0.4.0 support for Band Interleaved by Pixel (BIP) format
+- **Lossy Compression** - v0.4.0 support for JPEG/WebP compressed tiles (15x smaller files)
 
 ## Installation
 
@@ -73,6 +75,8 @@ LOAD raquet;
 - CMake 3.12+
 - C++17 compatible compiler
 - zlib (for gzip decompression)
+- libjpeg (optional, for JPEG lossy compression - v0.4.0)
+- libwebp (optional, for WebP lossy compression - v0.4.0)
 
 ```bash
 # Clone the repository
@@ -258,6 +262,13 @@ ORDER BY decade;
 | `ST_Clip(band, block, geometry, metadata, nodata)` | Clip with nodata filtering | `DOUBLE[]` |
 | `ST_ClipMask(band, block, geometry, metadata, nodata)` | Full tile with outside pixels set to nodata | `DOUBLE[]` |
 
+### Interleaved Layout Functions (v0.4.0)
+
+| Function | Description | Return Type |
+|----------|-------------|-------------|
+| `raquet_pixel_interleaved(pixels, metadata, band_idx, x, y)` | Get pixel from interleaved (BIP) data | `DOUBLE` |
+| `ST_RasterValueInterleaved(block, pixels, point_geom, metadata, band_idx)` | Get pixel using GEOMETRY from interleaved data | `DOUBLE` |
+
 ### Band Math Functions
 
 | Function | Description | Return Type |
@@ -274,10 +285,24 @@ ORDER BY decade;
 |----------|-------------|-------------|
 | `raquet_is_metadata_row(block)` | Check if block = 0 (metadata) | `BOOLEAN` |
 | `raquet_is_data_row(block)` | Check if block != 0 (data) | `BOOLEAN` |
-| `raquet_parse_metadata(json)` | Parse metadata JSON | `STRUCT(...)` |
+| `raquet_parse_metadata(json)` | Parse metadata JSON (returns v0.4.0 struct) | `STRUCT(...)` |
 | `raquet_band_type(metadata, band_idx)` | Get band data type | `VARCHAR` |
 | `raquet_compression(metadata)` | Get compression type | `VARCHAR` |
 | `raquet_block_size(metadata)` | Get tile size | `INTEGER` |
+
+**`raquet_parse_metadata` returns:**
+```
+STRUCT(
+    compression VARCHAR,           -- 'gzip', 'none', 'jpeg', 'webp'
+    compression_quality INTEGER,   -- JPEG/WebP quality (1-100), 0 if N/A
+    band_layout VARCHAR,           -- 'sequential' or 'interleaved'
+    block_width INTEGER,
+    block_height INTEGER,
+    min_zoom INTEGER,
+    max_zoom INTEGER,
+    num_bands INTEGER
+)
+```
 
 ## Supported Data Types
 
@@ -534,6 +559,61 @@ SELECT ST_ClipMask(band_1, block, clip_geom, metadata, -9999.0) AS masked_tile
 FROM read_raquet('raster_data.parquet');
 ```
 
+### Interleaved Layout and Lossy Compression (v0.4.0)
+
+RaQuet v0.4.0 introduces interleaved band layout and lossy compression for significantly smaller file sizes.
+
+```sql
+LOAD raquet;
+LOAD httpfs;
+
+-- Check if a file uses interleaved layout
+WITH meta AS (
+    SELECT metadata
+    FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet')
+    WHERE block = 0
+)
+SELECT
+    (raquet_parse_metadata(metadata)).compression,      -- 'jpeg'
+    (raquet_parse_metadata(metadata)).compression_quality,  -- 85
+    (raquet_parse_metadata(metadata)).band_layout       -- 'interleaved'
+FROM meta;
+
+-- Extract RGB values from interleaved JPEG file
+WITH meta AS (
+    SELECT metadata FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet') WHERE block = 0
+),
+data AS (
+    SELECT block, pixels FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet') WHERE block != 0 LIMIT 1
+)
+SELECT
+    raquet_pixel_interleaved(data.pixels, meta.metadata, 0, 128, 128) as red,
+    raquet_pixel_interleaved(data.pixels, meta.metadata, 1, 128, 128) as green,
+    raquet_pixel_interleaved(data.pixels, meta.metadata, 2, 128, 128) as blue
+FROM data, meta;
+
+-- Use ST_RasterValueInterleaved with GEOMETRY
+SELECT ST_RasterValueInterleaved(
+    d.block,
+    d.pixels,
+    'POINT(33.5 16.85)'::GEOMETRY,
+    m.metadata,
+    0  -- band index: 0=red, 1=green, 2=blue
+) as red_value
+FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet') d,
+     (SELECT metadata FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet') WHERE block=0) m
+WHERE d.block = quadbin_from_lonlat(33.5, 16.85, 10);
+```
+
+**File Size Comparison (same Sentinel-2 TCI data):**
+
+| Format | Layout | Compression | File Size | Relative |
+|--------|--------|-------------|-----------|----------|
+| Baseline | Sequential | gzip | 256 MB | 1.0x |
+| v0.4.0 | Interleaved | gzip | 286 MB | 1.1x |
+| v0.4.0 | Interleaved | JPEG (q85) | 27 MB | **0.1x** |
+| v0.4.0 | Interleaved | WebP (q90) | 17 MB | **0.07x** |
+
 ### Band Math and Vegetation Indices
 
 ```sql
@@ -628,13 +708,26 @@ The `time_ts` column enables efficient queries like `WHERE YEAR(time_ts) = 2010`
 
 A Raquet file is a Parquet file with specific conventions:
 
-### Standard Raster Schema
+### Standard Raster Schema (Sequential Layout)
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `block` | `UBIGINT` | QUADBIN cell ID (0 for metadata row) |
-| `band_1`, `band_2`, ... | `BLOB` | Compressed pixel data |
+| `band_1`, `band_2`, ... | `BLOB` | Compressed pixel data (one column per band) |
 | `metadata` | `VARCHAR` | JSON metadata (only in row where block=0) |
+
+### Interleaved Raster Schema (v0.4.0)
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `block` | `UBIGINT` | QUADBIN cell ID (0 for metadata row) |
+| `pixels` | `BLOB` | All bands interleaved as [R₀,G₀,B₀,R₁,G₁,B₁,...] |
+| `metadata` | `VARCHAR` | JSON metadata (only in row where block=0) |
+
+**Interleaved layout advantages:**
+- Better compression for correlated bands (RGB imagery)
+- Required for JPEG/WebP lossy compression
+- Single column simplifies schema
 
 ### Time-Series Raster Schema
 
@@ -658,13 +751,22 @@ For rasters with temporal dimensions (e.g., NetCDF files), two additional column
 **Metadata JSON Structure:**
 ```json
 {
+  "file_format": "raquet",
   "compression": "gzip",
-  "block_width": 256,
-  "block_height": 256,
-  "minresolution": 0,
-  "maxresolution": 15,
+  "compression_quality": 85,
+  "band_layout": "interleaved",
+  "crs": "EPSG:3857",
+  "tiling": {
+    "block_width": 256,
+    "block_height": 256,
+    "min_zoom": 0,
+    "max_zoom": 15,
+    "scheme": "quadbin"
+  },
   "bands": [
-    {"name": "elevation", "type": "int16", "nodata": -9999}
+    {"name": "red", "type": "uint8"},
+    {"name": "green", "type": "uint8"},
+    {"name": "blue", "type": "uint8", "nodata": 0}
   ]
 }
 ```
@@ -731,6 +833,8 @@ Or use tools like [rio-tiler](https://github.com/cogeotiff/rio-tiler) or [titile
 
 - **DuckDB** - Core database engine (included as submodule)
 - **zlib** - For gzip decompression (system dependency)
+- **libjpeg** - For JPEG decompression (optional, enables JPEG lossy compression)
+- **libwebp** - For WebP decompression (optional, enables WebP lossy compression)
 
 ## License
 
@@ -776,6 +880,17 @@ CARTO provides sample Raquet files for testing:
 | `naip_test.parquet` | NAIP aerial imagery, NY area (3 bands, uint8) | 380 MB | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet) |
 | `europe.parquet` | European coverage | - | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/europe.parquet) |
 | `TCI.parquet` | Sentinel-2 True Color (3 bands, uint8) | 261 MB | [Download](https://storage.googleapis.com/sdsc_demo25/TCI.parquet) |
+
+**v0.4.0 Experimental Files (Interleaved Layout + Lossy Compression):**
+
+| File | Layout | Compression | Size | URL |
+|------|--------|-------------|------|-----|
+| `tci_sequential_gzip.parquet` | Sequential | gzip | 256 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_sequential_gzip.parquet) |
+| `tci_interleaved_gzip.parquet` | Interleaved | gzip | 286 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_interleaved_gzip.parquet) |
+| `tci_interleaved_jpeg.parquet` | Interleaved | JPEG (q85) | 27 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_interleaved_jpeg.parquet) |
+| `tci_interleaved_webp.parquet` | Interleaved | WebP (q90) | 17 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_interleaved_webp.parquet) |
+
+*All experimental files contain the same Sentinel-2 TCI imagery (Sudan/Nile region, 10980×10980 pixels, 3 bands RGB uint8).*
 
 **Time-Series Sample Data:**
 
@@ -826,6 +941,9 @@ WHERE block = quadbin_from_lonlat(-73.22, 40.91, 18);
 - [x] `ST_BandMath()` - Generic band arithmetic operations
 - [x] Time-series support with CF conventions (NetCDF compatible)
 - [x] Cloud-native access via httpfs (S3/GCS/HTTP)
+- [x] **v0.4.0:** Interleaved band layout (BIP) support
+- [x] **v0.4.0:** JPEG lossy compression support
+- [x] **v0.4.0:** WebP lossy compression support
 
 **Planned:**
 - [ ] `read_raquet()` - Dedicated table function with automatic metadata handling
