@@ -72,6 +72,20 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
     {nullptr, nullptr, {nullptr}, {{nullptr, nullptr}}, nullptr}
 };
 
+// Table macro definition for read_raquet_metadata
+// Returns the metadata row only (block = 0)
+static const DefaultTableMacro RAQUET_METADATA_TABLE_MACRO = {
+    DEFAULT_SCHEMA,
+    "read_raquet_metadata",
+    {"file", nullptr},
+    {{nullptr, nullptr}},
+    R"(
+        SELECT metadata
+        FROM read_parquet(file)
+        WHERE block = 0
+     )"
+};
+
 // Create a table macro function from a DefaultTableMacro definition
 static unique_ptr<MacroFunction> CreateTableMacroFunction(const DefaultTableMacro &default_macro) {
     Parser parser;
@@ -106,6 +120,18 @@ static unique_ptr<CreateMacroInfo> CreateReadRaquetMacroInfo() {
     return bind_info;
 }
 
+static unique_ptr<CreateMacroInfo> CreateReadRaquetMetadataMacroInfo() {
+    auto bind_info = make_uniq<CreateMacroInfo>(CatalogType::TABLE_MACRO_ENTRY);
+    bind_info->schema = DEFAULT_SCHEMA;
+    bind_info->name = "read_raquet_metadata";
+    bind_info->temporary = true;
+    bind_info->internal = true;
+
+    bind_info->macros.push_back(CreateTableMacroFunction(RAQUET_METADATA_TABLE_MACRO));
+
+    return bind_info;
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
     // Register all functions
     RegisterQuadbinFunctions(loader);
@@ -121,6 +147,10 @@ static void LoadInternal(ExtensionLoader &loader) {
     // Register read_raquet table macro with all overloads
     auto macro_info = CreateReadRaquetMacroInfo();
     loader.RegisterFunction(*macro_info);
+
+    // Register read_raquet_metadata table macro
+    auto metadata_macro_info = CreateReadRaquetMetadataMacroInfo();
+    loader.RegisterFunction(*metadata_macro_info);
 }
 
 void RaquetExtension::Load(ExtensionLoader &loader) {

@@ -1,0 +1,31 @@
+# name: test/sql/read_raquet_macros.test
+# description: Test read_raquet and read_raquet_metadata table macros
+# group: [raquet]
+
+require raquet
+
+require parquet
+
+statement ok
+CREATE TABLE test_raquet_data AS
+SELECT * FROM (VALUES
+    (0::UBIGINT, NULL::BLOB,
+     '{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1,"min_zoom":0,"max_zoom":0,"scheme":"quadbin"},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR),
+    (123::UBIGINT, '\x01'::BLOB, NULL::VARCHAR)
+) AS t(block, band_1, metadata);
+
+statement ok
+COPY test_raquet_data TO 'duckdb_unittest_tempdir/read_raquet_macros.parquet' (FORMAT 'parquet');
+
+query I
+SELECT metadata FROM read_raquet_metadata('duckdb_unittest_tempdir/read_raquet_macros.parquet');
+----
+{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1,"min_zoom":0,"max_zoom":0,"scheme":"quadbin"},"bands":[{"name":"band_1","type":"uint8"}]}
+
+query II
+SELECT block, metadata FROM read_raquet('duckdb_unittest_tempdir/read_raquet_macros.parquet');
+----
+123	{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1,"min_zoom":0,"max_zoom":0,"scheme":"quadbin"},"bands":[{"name":"band_1","type":"uint8"}]}
+
+statement ok
+DROP TABLE test_raquet_data;

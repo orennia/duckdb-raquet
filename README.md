@@ -108,7 +108,7 @@ make test
 LOAD raquet;
 
 -- Read a Raquet file (it's just Parquet!)
-SELECT * FROM read_parquet('raster.parquet') WHERE block != 0 LIMIT 10;
+SELECT * FROM read_raquet('raster.parquet') LIMIT 10;
 
 -- Get pixel value at a location
 SELECT ST_RasterValue(
@@ -120,7 +120,7 @@ SELECT ST_RasterValue(
     256,              -- Tile size
     'gzip'            -- Compression
 ) AS elevation
-FROM read_parquet('dem.parquet')
+FROM read_raquet('dem.parquet')
 WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
 ```
 
@@ -139,7 +139,7 @@ SELECT
     block,
     quadbin_resolution(block) as zoom,
     (ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip', 0)).mean as red_mean
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
+FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
 WHERE quadbin_resolution(block) = 14
 LIMIT 5;
 
@@ -157,7 +157,7 @@ SELECT
         (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
         (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
         256, 'gzip') as blue
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
+FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
 WHERE block = quadbin_from_lonlat(33.5, 16.85, 14);
 ```
 
@@ -174,16 +174,15 @@ SELECT
     COUNT(DISTINCT block) as tiles,
     MIN(time_ts) as earliest,
     MAX(time_ts) as latest
-FROM read_parquet('cfsr_sst.parquet')
-WHERE block != 0;
+FROM read_raquet('cfsr_sst.parquet');
 -- Result: 1,296 rows, 3 tiles, 1980-01-01 to 2015-12-01
 
 -- Filter by year using derived timestamp
 SELECT
     time_ts,
     (ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean as sst
-FROM read_parquet('cfsr_sst.parquet')
-WHERE block != 0 AND YEAR(time_ts) = 2010
+FROM read_raquet('cfsr_sst.parquet')
+WHERE YEAR(time_ts) = 2010
 ORDER BY time_ts
 LIMIT 5;
 
@@ -191,8 +190,7 @@ LIMIT 5;
 SELECT
     (YEAR(time_ts) / 10) * 10 as decade,
     AVG((ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean) as avg_sst
-FROM read_parquet('cfsr_sst.parquet')
-WHERE block != 0
+FROM read_raquet('cfsr_sst.parquet')
 GROUP BY (YEAR(time_ts) / 10) * 10
 ORDER BY decade;
 ```
@@ -323,15 +321,17 @@ STRUCT(
 
 ### Reading Raquet Files
 
+Use `read_raquet()` for data rows (metadata handled automatically) and `read_raquet_metadata()` when you only need the metadata row.
+
 ```sql
 -- Raquet files are standard Parquet, read directly
-SELECT * FROM read_parquet('elevation.parquet') LIMIT 10;
+SELECT * FROM read_raquet('elevation.parquet') LIMIT 10;
 
--- Filter data rows (exclude metadata row where block = 0)
-SELECT * FROM read_parquet('elevation.parquet') WHERE block != 0;
+-- Read only data rows (metadata is handled automatically)
+SELECT * FROM read_raquet('elevation.parquet');
 
 -- Get metadata row
-SELECT metadata FROM read_parquet('elevation.parquet') WHERE block = 0;
+SELECT metadata FROM read_raquet_metadata('elevation.parquet');
 ```
 
 ### QUADBIN Spatial Indexing
@@ -400,7 +400,7 @@ SELECT
     ) AS elevation
 FROM points p
 JOIN dem r ON quadbin_from_lonlat(ST_X(p.geom), ST_Y(p.geom), 13) = r.block
-WHERE r.block != 0;
+;
 ```
 
 ### Summary Statistics
@@ -411,7 +411,6 @@ SELECT
     block,
     (ST_RasterSummaryStats(band_1, 'int16', 256, 256, 'gzip')).*
 FROM dem
-WHERE block != 0
 LIMIT 5;
 -- Returns: count, sum, mean, min, max, stddev
 
@@ -420,7 +419,7 @@ SELECT
     block,
     (ST_RasterSummaryStats(band_1, 'int16', 256, 256, 'gzip', -9999)).*
 FROM dem
-WHERE block != 0;
+;
 ```
 
 ### Spatial Filtering
@@ -429,14 +428,12 @@ WHERE block != 0;
 -- Find tiles that contain a specific point
 SELECT block
 FROM dem
-WHERE quadbin_contains(block, -73.9857, 40.7484)
-  AND block != 0;
+WHERE quadbin_contains(block, -73.9857, 40.7484);
 
 -- Find tiles intersecting a bounding box
 SELECT block
 FROM dem
-WHERE quadbin_intersects_bbox(block, -74.1, 40.6, -73.8, 40.9)
-  AND block != 0;
+WHERE quadbin_intersects_bbox(block, -74.1, 40.6, -73.8, 40.9);
 ```
 
 ### Native GEOMETRY Support (DuckDB 1.5+)
@@ -449,7 +446,6 @@ SELECT
     block,
     quadbin_to_wkt(block)::GEOMETRY AS geom
 FROM dem
-WHERE block != 0
 LIMIT 5;
 
 -- Or use the native GEOMETRY conversion function
@@ -457,7 +453,6 @@ SELECT
     block,
     ST_GeomFromQuadbin(block) AS geom
 FROM dem
-WHERE block != 0
 LIMIT 5;
 
 -- Get elevation using GEOMETRY point
@@ -570,8 +565,7 @@ LOAD httpfs;
 -- Check if a file uses interleaved layout
 WITH meta AS (
     SELECT metadata
-    FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet')
-    WHERE block = 0
+    FROM read_raquet_metadata('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet')
 )
 SELECT
     (raquet_parse_metadata(metadata)).compression,      -- 'jpeg'
@@ -581,10 +575,10 @@ FROM meta;
 
 -- Extract RGB values from interleaved JPEG file
 WITH meta AS (
-    SELECT metadata FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet') WHERE block = 0
+    SELECT metadata FROM read_raquet_metadata('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet')
 ),
 data AS (
-    SELECT block, pixels FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet') WHERE block != 0 LIMIT 1
+    SELECT block, pixels FROM read_raquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet') LIMIT 1
 )
 SELECT
     raquet_pixel_interleaved(data.pixels, meta.metadata, 0, 128, 128) as red,
@@ -600,8 +594,8 @@ SELECT ST_RasterValueInterleaved(
     m.metadata,
     0  -- band index: 0=red, 1=green, 2=blue
 ) as red_value
-FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet') d,
-     (SELECT metadata FROM read_parquet('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet') WHERE block=0) m
+FROM read_raquet('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet') d,
+     (SELECT metadata FROM read_raquet_metadata('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet')) m
 WHERE d.block = quadbin_from_lonlat(33.5, 16.85, 10);
 ```
 
@@ -622,20 +616,19 @@ LOAD raquet;
 -- Calculate NDVI (Normalized Difference Vegetation Index)
 -- NDVI = (NIR - Red) / (NIR + Red)
 WITH meta AS (
-    SELECT metadata FROM read_parquet('satellite.parquet') WHERE block = 0
+    SELECT metadata FROM read_raquet_metadata('satellite.parquet')
 )
 SELECT
     block,
     ST_NDVI(band_4, band_3, (SELECT metadata FROM meta)) AS ndvi_values
-FROM read_parquet('satellite.parquet')
-WHERE block != 0;
+FROM read_raquet('satellite.parquet');
 
 -- Get NDVI statistics directly (more efficient than computing array first)
 SELECT
     block,
     (ST_NormalizedDifferenceStats(band_4, band_3, metadata)).*
 FROM satellite_data
-WHERE block != 0;
+;
 -- Returns: count, sum, mean, min, max, stddev
 
 -- Generic band math operations
@@ -658,8 +651,7 @@ SELECT
     COUNT(DISTINCT block) as unique_tiles,
     MIN(time_ts) as earliest,
     MAX(time_ts) as latest
-FROM read_parquet('cfsr_sst.parquet')
-WHERE block != 0;
+FROM read_raquet('cfsr_sst.parquet');
 -- Result: 1296 rows, 3 tiles, 1980-01-01 to 2015-12-01
 
 -- Filter by year using the derived timestamp (easy SQL)
@@ -667,23 +659,21 @@ SELECT
     block,
     time_ts,
     (ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean as sst_mean
-FROM read_parquet('cfsr_sst.parquet')
-WHERE block != 0
-  AND YEAR(time_ts) = 2010
+FROM read_raquet('cfsr_sst.parquet')
+WHERE YEAR(time_ts) = 2010
 ORDER BY time_ts
 LIMIT 5;
 
 -- Filter by date range
 SELECT *
-FROM read_parquet('cfsr_sst.parquet')
-WHERE block != 0
-  AND time_ts >= '2000-01-01' AND time_ts < '2010-01-01';
+FROM read_raquet('cfsr_sst.parquet')
+WHERE time_ts >= '2000-01-01' AND time_ts < '2010-01-01';
 
 -- Calculate annual averages for climate analysis
 SELECT
     YEAR(time_ts) as year,
     AVG((ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean) as annual_sst
-FROM read_parquet('cfsr_sst.parquet')
+FROM read_raquet('cfsr_sst.parquet')
 WHERE block = 5192650370358181887  -- specific tile
 GROUP BY YEAR(time_ts)
 ORDER BY year;
@@ -691,8 +681,8 @@ ORDER BY year;
 -- Use CF time value directly (for NetCDF compatibility)
 -- CF units: "minutes since 1980-01-01 00:00"
 SELECT time_cf, time_ts
-FROM read_parquet('cfsr_sst.parquet')
-WHERE block != 0 AND time_cf < 100000;  -- First ~2 months
+FROM read_raquet('cfsr_sst.parquet')
+WHERE time_cf < 100000;  -- First ~2 months
 ```
 
 **Why dual time columns?**
@@ -913,15 +903,14 @@ SELECT
     block,
     quadbin_resolution(block) as zoom,
     (quadbin_to_bbox(block)).*
-FROM read_parquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/riyadh.parquet')
-WHERE block != 0
+FROM read_raquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/riyadh.parquet')
 LIMIT 5;
 
 -- Get pixel value from NAIP imagery
 SELECT ST_RasterValue(
     block, band_1, -73.22, 40.91, 'uint8', 256, 'gzip'
 ) as red_value
-FROM read_parquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet')
+FROM read_raquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet')
 WHERE block = quadbin_from_lonlat(-73.22, 40.91, 18);
 ```
 
@@ -937,6 +926,8 @@ WHERE block = quadbin_from_lonlat(-73.22, 40.91, 18);
 - [x] `ST_Intersects()` / `ST_Contains()` - PostGIS-like spatial predicates
 - [x] `ST_GeomFromQuadbin()` - Convert QUADBIN cell to GEOMETRY
 - [x] `ST_Clip()` / `ST_ClipMask()` - Clip rasters to geometry boundaries
+- [x] `read_raquet()` - Table macro with automatic metadata handling
+- [x] `read_raquet_metadata()` - Table macro for metadata-only reads
 - [x] `ST_NDVI()` / `ST_NormalizedDifference()` - Vegetation and spectral indices
 - [x] `ST_BandMath()` - Generic band arithmetic operations
 - [x] Time-series support with CF conventions (NetCDF compatible)
@@ -946,7 +937,6 @@ WHERE block = quadbin_from_lonlat(-73.22, 40.91, 18);
 - [x] **v0.4.0:** WebP lossy compression support
 
 **Planned:**
-- [ ] `read_raquet()` - Dedicated table function with automatic metadata handling
 - [ ] Time-aware filtering in `read_raquet()` macro
 - [ ] Performance optimizations for batch pixel extraction
 - [ ] Streaming support for large raster files
