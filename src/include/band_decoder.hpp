@@ -99,6 +99,18 @@ inline double float16_to_double(uint16_t h) {
 // Decompress gzip data
 std::vector<uint8_t> decompress_gzip(const uint8_t *data, size_t size);
 
+// v0.4.0: Decompress JPEG image to raw RGB bytes
+// Returns decoded image data in RGB format (3 bytes per pixel, row-major)
+// width_out and height_out are set to the decoded image dimensions
+std::vector<uint8_t> decompress_jpeg(const uint8_t *data, size_t size,
+                                      int &width_out, int &height_out, int &channels_out);
+
+// v0.4.0: Decompress WebP image to raw RGB/RGBA bytes
+// Returns decoded image data in RGB or RGBA format (row-major)
+// width_out and height_out are set to the decoded image dimensions
+std::vector<uint8_t> decompress_webp(const uint8_t *data, size_t size,
+                                      int &width_out, int &height_out, int &channels_out);
+
 // Get single pixel value from raw (decompressed) band data
 inline double get_pixel_value(const uint8_t *data, size_t offset, BandDataType dtype) {
     switch (dtype) {
@@ -166,6 +178,22 @@ std::vector<double> decode_band(const uint8_t *band_data, size_t band_size,
                                  const std::string &dtype_str,
                                  int width, int height,
                                  bool compressed);
+
+// v0.4.0: Decode pixel from interleaved (BIP) layout
+// For interleaved data, all bands are stored in a single 'pixels' column
+// Data layout: [R0,G0,B0,R1,G1,B1,...] where each pixel's bands are adjacent
+double decode_pixel_interleaved(const uint8_t *pixels_data, size_t pixels_size,
+                                 const std::string &dtype_str,
+                                 int pixel_x, int pixel_y, int width,
+                                 int band_index, int num_bands,
+                                 const std::string &compression);
+
+// v0.4.0: Decode entire band from interleaved layout
+std::vector<double> decode_band_interleaved(const uint8_t *pixels_data, size_t pixels_size,
+                                             const std::string &dtype_str,
+                                             int width, int height,
+                                             int band_index, int num_bands,
+                                             const std::string &compression);
 
 // Statistics result structure
 struct BandStats {

@@ -23,10 +23,12 @@ struct BandInfo {
         : name(n), type(t), nodata(nd), has_nodata(true) {}
 };
 
-// Parsed raquet metadata (v0.3.0 format)
+// Parsed raquet metadata (v0.4.0 format)
 struct RaquetMetadata {
     std::string file_format;  // new in v0.3.0: should be "raquet"
     std::string compression;
+    int compression_quality;  // new in v0.4.0: JPEG/WebP quality (1-100), 0 if not specified
+    std::string band_layout;  // new in v0.4.0: "sequential" (default) or "interleaved"
     int block_width;
     int block_height;
     int min_zoom;       // was minresolution
@@ -73,6 +75,21 @@ struct RaquetMetadata {
         // Use exact comparison for integer types, approximate for float
         return value == info.nodata ||
                (std::isnan(value) && std::isnan(info.nodata));
+    }
+
+    // v0.4.0: Check if band layout is interleaved
+    bool is_interleaved() const {
+        return band_layout == "interleaved";
+    }
+
+    // v0.4.0: Check if compression is lossy (JPEG/WebP)
+    bool is_lossy_compression() const {
+        return compression == "jpeg" || compression == "webp";
+    }
+
+    // v0.4.0: Get the number of bands
+    int num_bands() const {
+        return static_cast<int>(bands.size());
     }
 };
 
@@ -250,7 +267,7 @@ inline std::vector<std::pair<std::string, std::string>> parse_bands(const std::s
     return bands;
 }
 
-// Parse metadata JSON string (v0.3.0 format)
+// Parse metadata JSON string (v0.4.0 format)
 inline RaquetMetadata parse_metadata(const std::string &json) {
     RaquetMetadata meta;
 
@@ -259,6 +276,13 @@ inline RaquetMetadata parse_metadata(const std::string &json) {
 
     meta.compression = extract_json_string(json, "compression");
     if (meta.compression.empty()) meta.compression = "none";
+
+    // New in v0.4.0: compression quality for JPEG/WebP
+    meta.compression_quality = extract_json_int(json, "compression_quality", 0);
+
+    // New in v0.4.0: band layout (sequential or interleaved)
+    meta.band_layout = extract_json_string(json, "band_layout");
+    if (meta.band_layout.empty()) meta.band_layout = "sequential";
 
     meta.crs = extract_json_string(json, "crs");
 
