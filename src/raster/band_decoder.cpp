@@ -159,20 +159,27 @@ double decode_pixel(const uint8_t *band_data, size_t band_size,
                     bool compressed) {
     BandDataType dtype = parse_dtype(dtype_str);
 
+    if (pixel_x < 0 || pixel_y < 0 || width <= 0) {
+        throw std::out_of_range("Invalid pixel coordinates or width");
+    }
+
     const uint8_t *data;
+    size_t data_size;
     std::vector<uint8_t> decompressed;
 
     if (compressed) {
         decompressed = decompress_gzip(band_data, band_size);
         data = decompressed.data();
+        data_size = decompressed.size();
     } else {
         data = band_data;
+        data_size = band_size;
     }
 
     // Row-major order: offset = y * width + x
     size_t offset = static_cast<size_t>(pixel_y) * width + pixel_x;
 
-    return get_pixel_value(data, offset, dtype);
+    return get_pixel_value(data, data_size, offset, dtype);
 }
 
 std::vector<double> decode_band(const uint8_t *band_data, size_t band_size,
@@ -181,21 +188,36 @@ std::vector<double> decode_band(const uint8_t *band_data, size_t band_size,
                                  bool compressed) {
     BandDataType dtype = parse_dtype(dtype_str);
 
+    if (width <= 0 || height <= 0) {
+        throw std::invalid_argument("Invalid band dimensions");
+    }
+
     const uint8_t *data;
+    size_t data_size;
     std::vector<uint8_t> decompressed;
 
     if (compressed) {
         decompressed = decompress_gzip(band_data, band_size);
         data = decompressed.data();
+        data_size = decompressed.size();
     } else {
         data = band_data;
+        data_size = band_size;
     }
 
     size_t pixel_count = static_cast<size_t>(width) * height;
+    size_t expected_size = pixel_count * dtype_size(dtype);
+    if (expected_size > data_size) {
+        throw std::out_of_range("Band data (" + std::to_string(data_size) +
+                                " bytes) too small for " + std::to_string(width) + "x" +
+                                std::to_string(height) + " " + dtype_str + " tile (" +
+                                std::to_string(expected_size) + " bytes needed)");
+    }
+
     std::vector<double> result(pixel_count);
 
     for (size_t i = 0; i < pixel_count; i++) {
-        result[i] = get_pixel_value(data, i, dtype);
+        result[i] = get_pixel_value(data, data_size, i, dtype);
     }
 
     return result;
@@ -209,17 +231,28 @@ BandStats compute_band_stats(const uint8_t *band_data, size_t band_size,
                               double nodata) {
     BandDataType dtype = parse_dtype(dtype_str);
 
+    if (width <= 0 || height <= 0) {
+        throw std::invalid_argument("Invalid band dimensions");
+    }
+
     const uint8_t *data;
+    size_t data_size;
     std::vector<uint8_t> decompressed;
 
     if (compressed) {
         decompressed = decompress_gzip(band_data, band_size);
         data = decompressed.data();
+        data_size = decompressed.size();
     } else {
         data = band_data;
+        data_size = band_size;
     }
 
     size_t pixel_count = static_cast<size_t>(width) * height;
+    size_t expected_size = pixel_count * dtype_size(dtype);
+    if (expected_size > data_size) {
+        throw std::out_of_range("Band data too small for declared dimensions");
+    }
 
     BandStats stats;
     stats.min = std::numeric_limits<double>::max();
@@ -229,7 +262,7 @@ BandStats compute_band_stats(const uint8_t *band_data, size_t band_size,
     double m2 = 0.0;
 
     for (size_t i = 0; i < pixel_count; i++) {
-        double val = get_pixel_value(data, i, dtype);
+        double val = get_pixel_value(data, data_size, i, dtype);
 
         // Skip nodata values (handle NaN specially since NaN != NaN)
         if (has_nodata && (val == nodata || (std::isnan(val) && std::isnan(nodata)))) {
@@ -269,7 +302,12 @@ double decode_pixel_interleaved(const uint8_t *pixels_data, size_t pixels_size,
                                  int pixel_x, int pixel_y, int width,
                                  int band_index, int num_bands,
                                  const std::string &compression) {
+    if (pixel_x < 0 || pixel_y < 0 || width <= 0 || band_index < 0 || num_bands <= 0) {
+        throw std::out_of_range("Invalid pixel coordinates, width, or band index");
+    }
+
     const uint8_t *data;
+    size_t data_size;
     std::vector<uint8_t> decompressed;
     int decoded_width = width;
     int decoded_height = 0;
@@ -279,11 +317,13 @@ double decode_pixel_interleaved(const uint8_t *pixels_data, size_t pixels_size,
         // Gzip compression: decompress to raw interleaved bytes
         decompressed = decompress_gzip(pixels_data, pixels_size);
         data = decompressed.data();
+        data_size = decompressed.size();
     } else if (compression == "jpeg") {
         // JPEG: decode to RGB image, then extract channel
         decompressed = decompress_jpeg(pixels_data, pixels_size,
                                         decoded_width, decoded_height, decoded_channels);
         data = decompressed.data();
+        data_size = decompressed.size();
 
         // For JPEG, data type is always uint8, and we extract by channel index
         if (band_index >= decoded_channels) {
@@ -291,12 +331,16 @@ double decode_pixel_interleaved(const uint8_t *pixels_data, size_t pixels_size,
         }
         // JPEG pixel offset: (y * width + x) * channels + channel_index
         size_t offset = (static_cast<size_t>(pixel_y) * decoded_width + pixel_x) * decoded_channels + band_index;
+        if (offset >= data_size) {
+            throw std::out_of_range("JPEG pixel offset out of bounds");
+        }
         return static_cast<double>(data[offset]);
     } else if (compression == "webp") {
         // WebP: decode to RGBA image, then extract channel
         decompressed = decompress_webp(pixels_data, pixels_size,
                                         decoded_width, decoded_height, decoded_channels);
         data = decompressed.data();
+        data_size = decompressed.size();
 
         // For WebP, data type is always uint8, and we extract by channel index
         if (band_index >= decoded_channels) {
@@ -304,10 +348,14 @@ double decode_pixel_interleaved(const uint8_t *pixels_data, size_t pixels_size,
         }
         // WebP pixel offset: (y * width + x) * channels + channel_index
         size_t offset = (static_cast<size_t>(pixel_y) * decoded_width + pixel_x) * decoded_channels + band_index;
+        if (offset >= data_size) {
+            throw std::out_of_range("WebP pixel offset out of bounds");
+        }
         return static_cast<double>(data[offset]);
     } else if (compression == "none" || compression.empty()) {
         // No compression: use raw data directly
         data = pixels_data;
+        data_size = pixels_size;
     } else {
         throw std::invalid_argument("Unknown compression: " + compression);
     }
@@ -321,7 +369,7 @@ double decode_pixel_interleaved(const uint8_t *pixels_data, size_t pixels_size,
     size_t pixel_index = static_cast<size_t>(pixel_y) * width + pixel_x;
     size_t element_offset = pixel_index * num_bands + band_index;
 
-    return get_pixel_value(data, element_offset, dtype);
+    return get_pixel_value(data, data_size, element_offset, dtype);
 }
 
 // v0.4.0: Decode entire band from interleaved layout
@@ -330,7 +378,12 @@ std::vector<double> decode_band_interleaved(const uint8_t *pixels_data, size_t p
                                              int width, int height,
                                              int band_index, int num_bands,
                                              const std::string &compression) {
+    if (width <= 0 || height <= 0 || band_index < 0 || num_bands <= 0) {
+        throw std::invalid_argument("Invalid dimensions or band index");
+    }
+
     const uint8_t *data;
+    size_t data_size;
     std::vector<uint8_t> decompressed;
     int decoded_width = width;
     int decoded_height = height;
@@ -339,10 +392,12 @@ std::vector<double> decode_band_interleaved(const uint8_t *pixels_data, size_t p
     if (compression == "gzip") {
         decompressed = decompress_gzip(pixels_data, pixels_size);
         data = decompressed.data();
+        data_size = decompressed.size();
     } else if (compression == "jpeg") {
         decompressed = decompress_jpeg(pixels_data, pixels_size,
                                         decoded_width, decoded_height, decoded_channels);
         data = decompressed.data();
+        data_size = decompressed.size();
 
         // JPEG always uint8, extract channel
         if (band_index >= decoded_channels) {
@@ -352,13 +407,18 @@ std::vector<double> decode_band_interleaved(const uint8_t *pixels_data, size_t p
         size_t pixel_count = static_cast<size_t>(decoded_width) * decoded_height;
         std::vector<double> result(pixel_count);
         for (size_t i = 0; i < pixel_count; i++) {
-            result[i] = static_cast<double>(data[i * decoded_channels + band_index]);
+            size_t offset = i * decoded_channels + band_index;
+            if (offset >= data_size) {
+                throw std::out_of_range("JPEG pixel offset out of bounds");
+            }
+            result[i] = static_cast<double>(data[offset]);
         }
         return result;
     } else if (compression == "webp") {
         decompressed = decompress_webp(pixels_data, pixels_size,
                                         decoded_width, decoded_height, decoded_channels);
         data = decompressed.data();
+        data_size = decompressed.size();
 
         if (band_index >= decoded_channels) {
             throw std::invalid_argument("Band index exceeds WebP channels");
@@ -367,11 +427,16 @@ std::vector<double> decode_band_interleaved(const uint8_t *pixels_data, size_t p
         size_t pixel_count = static_cast<size_t>(decoded_width) * decoded_height;
         std::vector<double> result(pixel_count);
         for (size_t i = 0; i < pixel_count; i++) {
-            result[i] = static_cast<double>(data[i * decoded_channels + band_index]);
+            size_t offset = i * decoded_channels + band_index;
+            if (offset >= data_size) {
+                throw std::out_of_range("WebP pixel offset out of bounds");
+            }
+            result[i] = static_cast<double>(data[offset]);
         }
         return result;
     } else if (compression == "none" || compression.empty()) {
         data = pixels_data;
+        data_size = pixels_size;
     } else {
         throw std::invalid_argument("Unknown compression: " + compression);
     }
@@ -380,12 +445,19 @@ std::vector<double> decode_band_interleaved(const uint8_t *pixels_data, size_t p
     BandDataType dtype = parse_dtype(dtype_str);
 
     size_t pixel_count = static_cast<size_t>(width) * height;
+    // Validate total interleaved data fits
+    size_t total_elements = pixel_count * num_bands;
+    size_t expected_size = total_elements * dtype_size(dtype);
+    if (expected_size > data_size) {
+        throw std::out_of_range("Interleaved band data too small for declared dimensions");
+    }
+
     std::vector<double> result(pixel_count);
 
     for (size_t i = 0; i < pixel_count; i++) {
         // Interleaved offset: pixel_index * num_bands + band_index
         size_t element_offset = i * num_bands + band_index;
-        result[i] = get_pixel_value(data, element_offset, dtype);
+        result[i] = get_pixel_value(data, data_size, element_offset, dtype);
     }
 
     return result;

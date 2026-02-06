@@ -386,6 +386,7 @@ static void STClipFunction(DataChunk &args, ExpressionState &state, Vector &resu
 
             // Decompress band data if needed
             const uint8_t *raw_data;
+            size_t raw_data_size;
             std::vector<uint8_t> decompressed;
 
             if (compressed) {
@@ -394,8 +395,10 @@ static void STClipFunction(DataChunk &args, ExpressionState &state, Vector &resu
                     band.GetSize()
                 );
                 raw_data = decompressed.data();
+                raw_data_size = decompressed.size();
             } else {
                 raw_data = reinterpret_cast<const uint8_t*>(band.GetData());
+                raw_data_size = band.GetSize();
             }
 
             auto band_dtype = raquet::parse_dtype(dtype);
@@ -423,7 +426,7 @@ static void STClipFunction(DataChunk &args, ExpressionState &state, Vector &resu
                     // Check if pixel center is inside clip geometry
                     if (ClipPointInGeometry(pixel_lon, pixel_lat, clip_geom)) {
                         size_t offset = static_cast<size_t>(py) * width + px;
-                        double value = raquet::get_pixel_value(raw_data, offset, band_dtype);
+                        double value = raquet::get_pixel_value(raw_data, raw_data_size, offset, band_dtype);
                         clipped_values.push_back(value);
                     }
                 }
@@ -525,6 +528,7 @@ static void STClipNodataFunction(DataChunk &args, ExpressionState &state, Vector
             }
 
             const uint8_t *raw_data;
+            size_t raw_data_size;
             std::vector<uint8_t> decompressed;
 
             if (compressed) {
@@ -533,8 +537,10 @@ static void STClipNodataFunction(DataChunk &args, ExpressionState &state, Vector
                     band.GetSize()
                 );
                 raw_data = decompressed.data();
+                raw_data_size = decompressed.size();
             } else {
                 raw_data = reinterpret_cast<const uint8_t*>(band.GetData());
+                raw_data_size = band.GetSize();
             }
 
             auto band_dtype = raquet::parse_dtype(dtype);
@@ -557,7 +563,7 @@ static void STClipNodataFunction(DataChunk &args, ExpressionState &state, Vector
 
                     if (ClipPointInGeometry(pixel_lon, pixel_lat, clip_geom)) {
                         size_t offset = static_cast<size_t>(py) * width + px;
-                        double value = raquet::get_pixel_value(raw_data, offset, band_dtype);
+                        double value = raquet::get_pixel_value(raw_data, raw_data_size, offset, band_dtype);
 
                         // Skip nodata values
                         if (value != nodata) {
@@ -652,6 +658,7 @@ static void STClipMaskFunction(DataChunk &args, ExpressionState &state, Vector &
             bool has_clip_bbox = ClipExtractGeometryBBox(clip_geom, clip_min_lon, clip_min_lat, clip_max_lon, clip_max_lat);
 
             const uint8_t *raw_data;
+            size_t raw_data_size;
             std::vector<uint8_t> decompressed;
 
             if (compressed) {
@@ -660,8 +667,10 @@ static void STClipMaskFunction(DataChunk &args, ExpressionState &state, Vector &
                     band.GetSize()
                 );
                 raw_data = decompressed.data();
+                raw_data_size = decompressed.size();
             } else {
                 raw_data = reinterpret_cast<const uint8_t*>(band.GetData());
+                raw_data_size = band.GetSize();
             }
 
             auto band_dtype = raquet::parse_dtype(dtype);
@@ -682,7 +691,7 @@ static void STClipMaskFunction(DataChunk &args, ExpressionState &state, Vector &
             for (int py = 0; py < height; py++) {
                 for (int px = 0; px < width; px++) {
                     size_t pixel_idx = static_cast<size_t>(py) * width + px;
-                    double value = raquet::get_pixel_value(raw_data, pixel_idx, band_dtype);
+                    double value = raquet::get_pixel_value(raw_data, raw_data_size, pixel_idx, band_dtype);
 
                     if (tile_outside) {
                         // Entire tile outside - all nodata

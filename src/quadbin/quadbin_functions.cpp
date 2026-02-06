@@ -192,6 +192,19 @@ static bool ExtractPointCoordinates(const string_t &geom, double &x, double &y) 
 
 // Extract bounding box from a GEOMETRY value (works for POINT, POLYGON, etc.)
 // For POINT, min=max
+// Read a double from WKB data with endianness handling
+static double ReadWKBDouble(const uint8_t *data, bool little_endian) {
+    double val;
+    if (little_endian) {
+        memcpy(&val, data, 8);
+    } else {
+        uint8_t swapped[8];
+        for (int i = 0; i < 8; i++) swapped[i] = data[7 - i];
+        memcpy(&val, swapped, 8);
+    }
+    return val;
+}
+
 static bool ExtractBoundingBox(const string_t &geom, double &min_x, double &min_y, double &max_x, double &max_y) {
     const uint8_t *data = reinterpret_cast<const uint8_t*>(geom.GetData());
     idx_t size = geom.GetSize();
@@ -256,21 +269,16 @@ static bool ExtractBoundingBox(const string_t &geom, double &min_x, double &min_
 
         if (num_points == 0 || size < offset + num_points * 16) return false;
 
-        // Initialize with first point
-        if (little_endian) {
-            memcpy(&min_x, data + offset, 8);
-            memcpy(&min_y, data + offset + 8, 8);
-        } else {
-            return false; // Simplified: skip big endian for polygon
-        }
+        // Initialize with first point (handles both endiannesses)
+        min_x = ReadWKBDouble(data + offset, little_endian);
+        min_y = ReadWKBDouble(data + offset + 8, little_endian);
         max_x = min_x;
         max_y = min_y;
 
         // Find bbox of all points
         for (uint32_t i = 1; i < num_points; i++) {
-            double x, y;
-            memcpy(&x, data + offset + i * 16, 8);
-            memcpy(&y, data + offset + i * 16 + 8, 8);
+            double x = ReadWKBDouble(data + offset + i * 16, little_endian);
+            double y = ReadWKBDouble(data + offset + i * 16 + 8, little_endian);
             if (x < min_x) min_x = x;
             if (x > max_x) max_x = x;
             if (y < min_y) min_y = y;

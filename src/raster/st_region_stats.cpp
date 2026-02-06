@@ -3,15 +3,12 @@
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "band_decoder.hpp"
+#include "raquet_metadata.hpp"
 #include "quadbin.hpp"
 #include <cmath>
 #include <limits>
 #include <cstring>
 #include <string>
-#include "yyjson.hpp"
-
-using namespace duckdb_yyjson;
-
 namespace duckdb {
 
 // ============================================================================
@@ -339,86 +336,7 @@ struct RegionStatsState {
     double max_val;
 };
 
-// ============================================================================
-// Metadata parsing
-// ============================================================================
-
-struct RaquetMetadata {
-    std::string compression;
-    int block_width;
-    int block_height;
-    int min_zoom;       // v0.3.0: was min_resolution
-    int max_zoom;       // v0.3.0: was max_resolution
-    std::vector<std::pair<std::string, std::string>> bands;
-
-    static RaquetMetadata Parse(const std::string &json_str) {
-        RaquetMetadata meta;
-        meta.compression = "none";
-        meta.block_width = 256;
-        meta.block_height = 256;
-        meta.min_zoom = 0;
-        meta.max_zoom = 26;
-
-        yyjson_doc *doc = yyjson_read(json_str.c_str(), json_str.length(), 0);
-        if (!doc) {
-            throw InvalidInputException("ST_RegionStats: Invalid metadata JSON");
-        }
-
-        yyjson_val *root = yyjson_doc_get_root(doc);
-        if (!yyjson_is_obj(root)) {
-            yyjson_doc_free(doc);
-            throw InvalidInputException("ST_RegionStats: Metadata must be a JSON object");
-        }
-
-        yyjson_val *compression_val = yyjson_obj_get(root, "compression");
-        if (compression_val && yyjson_is_str(compression_val)) {
-            meta.compression = yyjson_get_str(compression_val);
-        }
-
-        // v0.3.0: Parse tiling object
-        yyjson_val *tiling_val = yyjson_obj_get(root, "tiling");
-        if (tiling_val && yyjson_is_obj(tiling_val)) {
-            yyjson_val *width_val = yyjson_obj_get(tiling_val, "block_width");
-            if (width_val && yyjson_is_int(width_val)) {
-                meta.block_width = yyjson_get_int(width_val);
-            }
-
-            yyjson_val *height_val = yyjson_obj_get(tiling_val, "block_height");
-            if (height_val && yyjson_is_int(height_val)) {
-                meta.block_height = yyjson_get_int(height_val);
-            }
-
-            yyjson_val *minzoom_val = yyjson_obj_get(tiling_val, "min_zoom");
-            if (minzoom_val && yyjson_is_int(minzoom_val)) {
-                meta.min_zoom = yyjson_get_int(minzoom_val);
-            }
-
-            yyjson_val *maxzoom_val = yyjson_obj_get(tiling_val, "max_zoom");
-            if (maxzoom_val && yyjson_is_int(maxzoom_val)) {
-                meta.max_zoom = yyjson_get_int(maxzoom_val);
-            }
-        }
-
-        // v0.3.0: bands are objects with name and type fields
-        yyjson_val *bands_val = yyjson_obj_get(root, "bands");
-        if (bands_val && yyjson_is_arr(bands_val)) {
-            size_t idx, max;
-            yyjson_val *band;
-            yyjson_arr_foreach(bands_val, idx, max, band) {
-                if (yyjson_is_obj(band)) {
-                    yyjson_val *name_val = yyjson_obj_get(band, "name");
-                    yyjson_val *dtype_val = yyjson_obj_get(band, "type");
-                    if (name_val && dtype_val && yyjson_is_str(name_val) && yyjson_is_str(dtype_val)) {
-                        meta.bands.emplace_back(yyjson_get_str(name_val), yyjson_get_str(dtype_val));
-                    }
-                }
-            }
-        }
-
-        yyjson_doc_free(doc);
-        return meta;
-    }
-};
+// Metadata parsing: uses canonical raquet::parse_metadata() from raquet_metadata.hpp
 
 // ============================================================================
 // ST_RegionStats Aggregate Function Implementation
@@ -531,7 +449,7 @@ static void RegionStatsFinalize(Vector &states, AggregateInputData &aggr_input_d
 
 // Helper function to process a tile for region stats
 static void ProcessTileForRegionStats(RegionStatsState &state, const string_t &band, uint64_t block,
-                                       const string_t &region, const RaquetMetadata &meta,
+                                       const string_t &region, const raquet::RaquetMetadata &meta,
                                        bool has_nodata, double nodata, int target_resolution) {
     if (band.GetSize() == 0) return;
     if (meta.bands.empty()) return;
@@ -567,6 +485,7 @@ static void ProcessTileForRegionStats(RegionStatsState &state, const string_t &b
 
     // Decompress band data if needed
     const uint8_t *raw_data;
+    size_t raw_data_size;
     std::vector<uint8_t> decompressed;
 
     if (compressed) {
@@ -575,8 +494,10 @@ static void ProcessTileForRegionStats(RegionStatsState &state, const string_t &b
             band.GetSize()
         );
         raw_data = decompressed.data();
+        raw_data_size = decompressed.size();
     } else {
         raw_data = reinterpret_cast<const uint8_t*>(band.GetData());
+        raw_data_size = band.GetSize();
     }
 
     auto band_dtype = raquet::parse_dtype(dtype);
@@ -600,10 +521,10 @@ static void ProcessTileForRegionStats(RegionStatsState &state, const string_t &b
 
             if (in_region) {
                 size_t offset = static_cast<size_t>(py) * width + px;
-                double value = raquet::get_pixel_value(raw_data, offset, band_dtype);
+                double value = raquet::get_pixel_value(raw_data, raw_data_size, offset, band_dtype);
 
-                // Skip nodata values
-                if (has_nodata && value == nodata) {
+                // Skip nodata values (handle NaN: NaN != NaN so need explicit check)
+                if (has_nodata && (value == nodata || (std::isnan(value) && std::isnan(nodata)))) {
                     continue;
                 }
 
@@ -649,11 +570,13 @@ static void RegionStatsUpdate(Vector inputs[], AggregateInputData &aggr_input_da
         auto &state = *states[i];
 
         try {
-            auto meta = RaquetMetadata::Parse(metadata_data[i].GetString());
-            // Default: use max resolution (no filtering, -1 = all resolutions pass through,
-            // but we actually want only max resolution for backward compatibility)
+            auto meta = raquet::parse_metadata(metadata_data[i].GetString());
+            // Default: use max resolution
             int target_res = meta.max_zoom;
-            ProcessTileForRegionStats(state, band_data[i], block_data[i], region_data[i], meta, false, 0.0, target_res);
+            // Auto-detect nodata from metadata band_info
+            bool has_nodata = !meta.band_info.empty() && meta.band_info[0].has_nodata;
+            double nodata = has_nodata ? meta.band_info[0].nodata : 0.0;
+            ProcessTileForRegionStats(state, band_data[i], block_data[i], region_data[i], meta, has_nodata, nodata, target_res);
         } catch (...) {
             // Skip tiles with errors
             continue;
@@ -678,6 +601,7 @@ static void RegionStatsUpdateNodata(Vector inputs[], AggregateInputData &aggr_in
 
     auto &band_validity = FlatVector::Validity(inputs[0]);
     auto &region_validity = FlatVector::Validity(inputs[2]);
+    auto &nodata_validity = FlatVector::Validity(inputs[4]);
 
     auto states = FlatVector::GetData<RegionStatsState *>(state_vector);
 
@@ -688,10 +612,10 @@ static void RegionStatsUpdateNodata(Vector inputs[], AggregateInputData &aggr_in
 
         auto &state = *states[i];
         double nodata = nodata_data[i];
-        bool has_nodata = !std::isnan(nodata);
+        bool has_nodata = nodata_validity.RowIsValid(i);
 
         try {
-            auto meta = RaquetMetadata::Parse(metadata_data[i].GetString());
+            auto meta = raquet::parse_metadata(metadata_data[i].GetString());
             int target_res = meta.max_zoom;
             ProcessTileForRegionStats(state, band_data[i], block_data[i], region_data[i], meta, has_nodata, nodata, target_res);
         } catch (...) {
@@ -702,7 +626,7 @@ static void RegionStatsUpdateNodata(Vector inputs[], AggregateInputData &aggr_in
 
 // Helper to compute target resolution from string and geometry
 static int ComputeTargetResolution(const std::string &resolution_str, const string_t &region,
-                                    const RaquetMetadata &meta) {
+                                    const raquet::RaquetMetadata &meta) {
     auto config = ParseResolution(resolution_str, meta.min_zoom, meta.max_zoom);
 
     if (config.mode == ResolutionMode::MAX) {
@@ -747,7 +671,7 @@ static void RegionStatsUpdateResolution(Vector inputs[], AggregateInputData &agg
         auto &state = *states[i];
 
         try {
-            auto meta = RaquetMetadata::Parse(metadata_data[i].GetString());
+            auto meta = raquet::parse_metadata(metadata_data[i].GetString());
             std::string res_str = resolution_data[i].GetString();
             int target_res = ComputeTargetResolution(res_str, region_data[i], meta);
             ProcessTileForRegionStats(state, band_data[i], block_data[i], region_data[i], meta, false, 0.0, target_res);
@@ -776,6 +700,7 @@ static void RegionStatsUpdateNodataResolution(Vector inputs[], AggregateInputDat
 
     auto &band_validity = FlatVector::Validity(inputs[0]);
     auto &region_validity = FlatVector::Validity(inputs[2]);
+    auto &nodata_validity = FlatVector::Validity(inputs[4]);
 
     auto states = FlatVector::GetData<RegionStatsState *>(state_vector);
 
@@ -786,10 +711,10 @@ static void RegionStatsUpdateNodataResolution(Vector inputs[], AggregateInputDat
 
         auto &state = *states[i];
         double nodata = nodata_data[i];
-        bool has_nodata = !std::isnan(nodata);
+        bool has_nodata = nodata_validity.RowIsValid(i);
 
         try {
-            auto meta = RaquetMetadata::Parse(metadata_data[i].GetString());
+            auto meta = raquet::parse_metadata(metadata_data[i].GetString());
             std::string res_str = resolution_data[i].GetString();
             int target_res = ComputeTargetResolution(res_str, region_data[i], meta);
             ProcessTileForRegionStats(state, band_data[i], block_data[i], region_data[i], meta, has_nodata, nodata, target_res);

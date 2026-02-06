@@ -14,16 +14,19 @@ namespace duckdb {
 // These functions perform pixel-by-pixel operations on raster bands
 // ============================================================================
 
-// Helper: Decode band data and return raw pixel pointer
+// Helper: Decode band data and return raw pixel pointer with data size
 static const uint8_t* DecodeBandData(const string_t &band, bool compressed,
-                                      std::vector<uint8_t> &decompressed_buffer) {
+                                      std::vector<uint8_t> &decompressed_buffer,
+                                      size_t &data_size_out) {
     if (compressed) {
         decompressed_buffer = raquet::decompress_gzip(
             reinterpret_cast<const uint8_t*>(band.GetData()),
             band.GetSize()
         );
+        data_size_out = decompressed_buffer.size();
         return decompressed_buffer.data();
     }
+    data_size_out = band.GetSize();
     return reinterpret_cast<const uint8_t*>(band.GetData());
 }
 
@@ -86,8 +89,9 @@ static void STNormalizedDifferenceFunction(DataChunk &args, ExpressionState &sta
 
             // Decompress band data
             std::vector<uint8_t> decompressed1, decompressed2;
-            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1);
-            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2);
+            size_t raw1_size, raw2_size;
+            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1, raw1_size);
+            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2, raw2_size);
 
             // Reserve space in result list
             ListVector::Reserve(result, total_list_size + num_pixels);
@@ -95,8 +99,8 @@ static void STNormalizedDifferenceFunction(DataChunk &args, ExpressionState &sta
 
             // Compute normalized difference for each pixel
             for (size_t p = 0; p < num_pixels; p++) {
-                double val1 = raquet::get_pixel_value(raw1, p, band1_dtype);
-                double val2 = raquet::get_pixel_value(raw2, p, band2_dtype);
+                double val1 = raquet::get_pixel_value(raw1, raw1_size, p, band1_dtype);
+                double val2 = raquet::get_pixel_value(raw2, raw2_size, p, band2_dtype);
 
                 double sum = val1 + val2;
                 double nd;
@@ -182,15 +186,16 @@ static void STNormalizedDifferenceNodataFunction(DataChunk &args, ExpressionStat
             auto band2_dtype = raquet::parse_dtype(dtype2);
 
             std::vector<uint8_t> decompressed1, decompressed2;
-            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1);
-            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2);
+            size_t raw1_size, raw2_size;
+            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1, raw1_size);
+            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2, raw2_size);
 
             ListVector::Reserve(result, total_list_size + num_pixels);
             child_data = FlatVector::GetData<double>(ListVector::GetEntry(result));
 
             for (size_t p = 0; p < num_pixels; p++) {
-                double val1 = raquet::get_pixel_value(raw1, p, band1_dtype);
-                double val2 = raquet::get_pixel_value(raw2, p, band2_dtype);
+                double val1 = raquet::get_pixel_value(raw1, raw1_size, p, band1_dtype);
+                double val2 = raquet::get_pixel_value(raw2, raw2_size, p, band2_dtype);
 
                 // Check for nodata
                 if (val1 == nodata || val2 == nodata) {
@@ -282,8 +287,9 @@ static void STBandMathFunction(DataChunk &args, ExpressionState &state, Vector &
             auto band2_dtype = raquet::parse_dtype(dtype2);
 
             std::vector<uint8_t> decompressed1, decompressed2;
-            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1);
-            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2);
+            size_t raw1_size, raw2_size;
+            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1, raw1_size);
+            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2, raw2_size);
 
             ListVector::Reserve(result, total_list_size + num_pixels);
             child_data = FlatVector::GetData<double>(ListVector::GetEntry(result));
@@ -306,8 +312,8 @@ static void STBandMathFunction(DataChunk &args, ExpressionState &state, Vector &
             }
 
             for (size_t p = 0; p < num_pixels; p++) {
-                double val1 = raquet::get_pixel_value(raw1, p, band1_dtype);
-                double val2 = raquet::get_pixel_value(raw2, p, band2_dtype);
+                double val1 = raquet::get_pixel_value(raw1, raw1_size, p, band1_dtype);
+                double val2 = raquet::get_pixel_value(raw2, raw2_size, p, band2_dtype);
 
                 double res;
                 switch (operation) {
@@ -399,8 +405,9 @@ static void STNormalizedDifferenceStatsFunction(DataChunk &args, ExpressionState
             auto band2_dtype = raquet::parse_dtype(dtype2);
 
             std::vector<uint8_t> decompressed1, decompressed2;
-            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1);
-            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2);
+            size_t raw1_size, raw2_size;
+            const uint8_t *raw1 = DecodeBandData(band1, compressed, decompressed1, raw1_size);
+            const uint8_t *raw2 = DecodeBandData(band2, compressed, decompressed2, raw2_size);
 
             // Streaming statistics using Welford's algorithm
             int64_t count = 0;
@@ -411,8 +418,8 @@ static void STNormalizedDifferenceStatsFunction(DataChunk &args, ExpressionState
             double max_val = std::numeric_limits<double>::lowest();
 
             for (size_t p = 0; p < num_pixels; p++) {
-                double val1 = raquet::get_pixel_value(raw1, p, band1_dtype);
-                double val2 = raquet::get_pixel_value(raw2, p, band2_dtype);
+                double val1 = raquet::get_pixel_value(raw1, raw1_size, p, band1_dtype);
+                double val2 = raquet::get_pixel_value(raw2, raw2_size, p, band2_dtype);
 
                 double s = val1 + val2;
                 double nd = (s != 0.0) ? (val1 - val2) / s : 0.0;

@@ -112,7 +112,14 @@ std::vector<uint8_t> decompress_webp(const uint8_t *data, size_t size,
                                       int &width_out, int &height_out, int &channels_out);
 
 // Get single pixel value from raw (decompressed) band data
-inline double get_pixel_value(const uint8_t *data, size_t offset, BandDataType dtype) {
+// data_size is the total size of the data buffer in bytes for bounds checking
+inline double get_pixel_value(const uint8_t *data, size_t data_size, size_t offset, BandDataType dtype) {
+    size_t elem_size = dtype_size(dtype);
+    size_t byte_offset = offset * elem_size;
+    if (byte_offset + elem_size > data_size) {
+        throw std::out_of_range("Pixel read at byte offset " + std::to_string(byte_offset) +
+                                " exceeds buffer of " + std::to_string(data_size) + " bytes");
+    }
     switch (dtype) {
         case BandDataType::UINT8:
             return static_cast<double>(data[offset]);

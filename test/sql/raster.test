@@ -220,6 +220,124 @@ statement ok
 DROP TABLE test_meta
 
 # =============================================================================
+# Test bounds checking - out-of-range pixel coordinates
+# =============================================================================
+
+# Create a small 2x2 tile for bounds testing
+statement ok
+CREATE TABLE test_bounds AS
+SELECT
+    1::UBIGINT as block,
+    '\x0A\x14\x1E\x28'::BLOB as band_1
+
+# Out-of-range x (999 on a width=2 tile) - returns NULL via buffer bounds check
+query I
+SELECT raquet_pixel(band_1, 'uint8', 999, 0, 2, 'none') FROM test_bounds
+----
+NULL
+
+# Out-of-range y (999 on a width=2 tile) - returns NULL via buffer bounds check
+query I
+SELECT raquet_pixel(band_1, 'uint8', 0, 999, 2, 'none') FROM test_bounds
+----
+NULL
+
+# Negative coordinates - returns NULL
+query I
+SELECT raquet_pixel(band_1, 'uint8', -1, 0, 2, 'none') FROM test_bounds
+----
+NULL
+
+# Valid coordinates still work
+query I
+SELECT raquet_pixel(band_1, 'uint8', 0, 0, 2, 'none') FROM test_bounds
+----
+10.0
+
+# Metadata-aware pixel with out-of-range coords - returns NULL
+statement ok
+CREATE TABLE test_bounds_meta AS
+SELECT
+    1::UBIGINT as block,
+    '\x0A\x14\x1E\x28'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+query I
+SELECT raquet_pixel(band_1, metadata, 999, 999) FROM test_bounds_meta
+----
+NULL
+
+# Valid metadata-aware access still works
+query I
+SELECT raquet_pixel(band_1, metadata, 1, 1) FROM test_bounds_meta
+----
+40.0
+
+statement ok
+DROP TABLE test_bounds
+
+statement ok
+DROP TABLE test_bounds_meta
+
+# =============================================================================
+# Test truncated blob handling
+# =============================================================================
+
+# Truncated blob: only 2 bytes but claiming 4x4 uint8 tile (needs 16 bytes) - returns NULL
+query I
+SELECT raquet_decode_band('\x0A\x14'::BLOB, 'uint8', 4, 4, 'none')
+----
+NULL
+
+# Empty blob returns NULL
+query I
+SELECT raquet_pixel(NULL, 'uint8', 0, 0, 4, 'none')
+----
+NULL
+
+# =============================================================================
+# Test NaN nodata handling in ST_RasterSummaryStats
+# =============================================================================
+
+# Create a tile with a NaN value (float32)
+# float32 NaN = 0x7FC00000 (little-endian: \x00\x00\xC0\x7F)
+# float32 1.0 = 0x3F800000 (little-endian: \x00\x00\x80\x3F)
+# float32 2.0 = 0x40000000 (little-endian: \x00\x00\x00\x40)
+# float32 3.0 = 0x40400000 (little-endian: \x00\x00\x40\x40)
+statement ok
+CREATE TABLE test_nan_nodata AS
+SELECT
+    1::UBIGINT as block,
+    '\x00\x00\x80\x3F\x00\x00\x00\x40\x00\x00\x40\x40\x00\x00\xC0\x7F'::BLOB as band_1
+
+# Without nodata filtering: count should be 4 (including NaN)
+query I
+SELECT (ST_RasterSummaryStats(band_1, 'float32', 2, 2, 'none')).count FROM test_nan_nodata
+----
+4
+
+# With NaN as nodata: count should be 3 (NaN filtered out)
+query I
+SELECT (ST_RasterSummaryStats(band_1, 'float32', 2, 2, 'none', 'NaN'::DOUBLE)).count FROM test_nan_nodata
+----
+3
+
+# With NaN as nodata: sum should be 6.0 (1+2+3)
+query I
+SELECT (ST_RasterSummaryStats(band_1, 'float32', 2, 2, 'none', 'NaN'::DOUBLE)).sum FROM test_nan_nodata
+----
+6.0
+
+# Without nodata arg (5-arg version, no filtering): count should be 4
+query I
+SELECT (ST_RasterSummaryStats(band_1, 'float32', 2, 2, 'none')).count FROM test_nan_nodata
+----
+4
+
+statement ok
+DROP TABLE test_nan_nodata
+
+# =============================================================================
 # Note: ST_RasterValue and spatial predicate functions use
 # DuckDB 1.5+ native GEOMETRY types. Create geometries using WKT cast:
 #   'POINT(-3.7 40.4)'::GEOMETRY

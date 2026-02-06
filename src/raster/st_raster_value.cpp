@@ -132,6 +132,8 @@ static void RaquetPixelFunction(DataChunk &args, ExpressionState &state, Vector 
                 static_cast<size_t>(band_size),
                 dtype, x, y, width, compressed
             );
+        } catch (const std::out_of_range &) {
+            result_mask.SetInvalid(i);
         } catch (const std::exception &e) {
             throw InvalidInputException("raquet_pixel error: %s", e.what());
         }
@@ -246,6 +248,13 @@ static void RaquetPixelWithMetadataFunction(DataChunk &args, ExpressionState &st
 
         try {
             auto meta = raquet::parse_metadata(metadata_str);
+
+            // Upper-bound check against tile dimensions
+            if (x >= meta.block_width || y >= meta.block_height) {
+                result_mask.SetInvalid(i);
+                continue;
+            }
+
             std::string dtype = meta.bands.empty() ? "uint8" : meta.bands[0].second;
             bool compressed = (meta.compression == "gzip");
 
@@ -254,6 +263,8 @@ static void RaquetPixelWithMetadataFunction(DataChunk &args, ExpressionState &st
                 static_cast<size_t>(band_size),
                 dtype, x, y, meta.block_width, compressed
             );
+        } catch (const std::out_of_range &) {
+            result_mask.SetInvalid(i);
         } catch (const std::exception &e) {
             throw InvalidInputException("raquet_pixel error: %s", e.what());
         }
@@ -297,6 +308,13 @@ static void RaquetPixelWithMetadataAndBandFunction(DataChunk &args, ExpressionSt
 
         try {
             auto meta = raquet::parse_metadata(metadata_str);
+
+            // Upper-bound check against tile dimensions
+            if (x >= meta.block_width || y >= meta.block_height) {
+                result_mask.SetInvalid(i);
+                continue;
+            }
+
             std::string dtype = meta.get_band_type(band_idx);
             bool compressed = (meta.compression == "gzip");
 
@@ -305,6 +323,8 @@ static void RaquetPixelWithMetadataAndBandFunction(DataChunk &args, ExpressionSt
                 static_cast<size_t>(band_size),
                 dtype, x, y, meta.block_width, compressed
             );
+        } catch (const std::out_of_range &) {
+            result_mask.SetInvalid(i);
         } catch (const std::exception &e) {
             throw InvalidInputException("raquet_pixel error: %s", e.what());
         }
