@@ -25,6 +25,7 @@ set(EXTENSION_SOURCES
     src/raster/st_raster_stats.cpp
     src/raster/st_region_stats.cpp
     src/raster/st_clip.cpp
+    src/raster/st_as_raster.cpp
     src/raster/band_math.cpp
     src/metadata/raquet_metadata.cpp
     src/table_functions/raquet_table_functions.cpp
