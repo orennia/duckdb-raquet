@@ -1,0 +1,215 @@
+# name: test/sql/st_as_raster.test
+# description: Test ST_AsRaster function
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test ST_AsRaster basic output size
+# =============================================================================
+
+# A 4x4 uint8 raster should produce 16 bytes
+query I
+SELECT length(ST_AsRaster(
+    'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+    quadbin_from_tile(0, 0, 0),
+    4, 4, 'uint8'
+))
+----
+16
+
+# A 2x2 uint16 raster should produce 8 bytes (2 bytes per pixel)
+query I
+SELECT length(ST_AsRaster(
+    'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+    quadbin_from_tile(0, 0, 0),
+    2, 2, 'uint16'
+))
+----
+8
+
+# A 2x2 float32 raster should produce 16 bytes (4 bytes per pixel)
+query I
+SELECT length(ST_AsRaster(
+    'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+    quadbin_from_tile(0, 0, 0),
+    2, 2, 'float32'
+))
+----
+16
+
+# =============================================================================
+# Test pixel values: full-coverage polygon fills all pixels with 1
+# =============================================================================
+
+# A world-spanning polygon on the root tile should rasterize all pixels to 1
+# Decode the band and check all values equal 1
+query I
+SELECT count(*)
+FROM UNNEST(raquet_decode_band(
+    ST_AsRaster(
+        'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+        quadbin_from_tile(0, 0, 0),
+        4, 4, 'uint8'
+    ),
+    'uint8', 4, 4, 'none'
+)) AS t(v)
+WHERE v = 1.0
+----
+16
+
+# =============================================================================
+# Test pixel values: non-overlapping polygon results in all nodata
+# =============================================================================
+
+# A small polygon far outside a tile should produce all-nodata raster
+query I
+SELECT count(*)
+FROM UNNEST(raquet_decode_band(
+    ST_AsRaster(
+        'POLYGON((170 80, 180 80, 180 85, 170 85, 170 80))'::GEOMETRY,
+        quadbin_from_tile(0, 0, 0),
+        4, 4, 'uint8'
+    ),
+    'uint8', 4, 4, 'none'
+)) AS t(v)
+WHERE v = 0.0
+----
+16
+
+# =============================================================================
+# Test explicit value and nodata parameters
+# =============================================================================
+
+# Full-coverage polygon with value=255, nodata=0: all pixels should be 255
+query I
+SELECT count(*)
+FROM UNNEST(raquet_decode_band(
+    ST_AsRaster(
+        'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+        quadbin_from_tile(0, 0, 0),
+        2, 2, 'uint8', 255.0, 0.0
+    ),
+    'uint8', 2, 2, 'none'
+)) AS t(v)
+WHERE v = 255.0
+----
+4
+
+# Non-overlapping polygon with value=255, nodata=128: all pixels should be 128
+query I
+SELECT count(*)
+FROM UNNEST(raquet_decode_band(
+    ST_AsRaster(
+        'POLYGON((170 80, 180 80, 180 85, 170 85, 170 80))'::GEOMETRY,
+        quadbin_from_tile(0, 0, 0),
+        2, 2, 'uint8', 255.0, 128.0
+    ),
+    'uint8', 2, 2, 'none'
+)) AS t(v)
+WHERE v = 128.0
+----
+4
+
+# =============================================================================
+# Test with metadata parameter
+# =============================================================================
+
+# Create a metadata-style JSON matching Raquet v0.3.0 format
+query I
+SELECT length(ST_AsRaster(
+    'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+    quadbin_from_tile(0, 0, 0),
+    '{"compression":"none","tiling":{"block_width":4,"block_height":4},"bands":[{"name":"band_1","type":"uint8"}]}'
+))
+----
+16
+
+# Metadata variant: verify all pixels = 1 for full-coverage polygon
+query I
+SELECT count(*)
+FROM UNNEST(raquet_decode_band(
+    ST_AsRaster(
+        'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+        quadbin_from_tile(0, 0, 0),
+        '{"compression":"none","tiling":{"block_width":4,"block_height":4},"bands":[{"name":"band_1","type":"uint8"}]}'
+    ),
+    'uint8', 4, 4, 'none'
+)) AS t(v)
+WHERE v = 1.0
+----
+16
+
+# Metadata variant with explicit value and nodata
+query I
+SELECT count(*)
+FROM UNNEST(raquet_decode_band(
+    ST_AsRaster(
+        'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+        quadbin_from_tile(0, 0, 0),
+        '{"compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}',
+        200.0, 0.0
+    ),
+    'uint8', 2, 2, 'none'
+)) AS t(v)
+WHERE v = 200.0
+----
+4
+
+# =============================================================================
+# Test data type compatibility with raquet_decode_band
+# =============================================================================
+
+# float32 band should produce float32 values
+query I
+SELECT count(*)
+FROM UNNEST(raquet_decode_band(
+    ST_AsRaster(
+        'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+        quadbin_from_tile(0, 0, 0),
+        2, 2, 'float32', 3.14, 0.0
+    ),
+    'float32', 2, 2, 'none'
+)) AS t(v)
+WHERE round(v, 2) = 3.14
+----
+4
+
+# =============================================================================
+# Test NULL handling
+# =============================================================================
+
+query I
+SELECT ST_AsRaster(
+    NULL::GEOMETRY,
+    quadbin_from_tile(0, 0, 0),
+    4, 4, 'uint8'
+)
+----
+NULL
+
+# =============================================================================
+# Test result is compatible with ST_RasterSummaryStats
+# =============================================================================
+
+# Full-coverage polygon: all 4 pixels should be 1 (sum=4, mean=1)
+query II
+SELECT
+    (ST_RasterSummaryStats(
+        ST_AsRaster(
+            'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+            quadbin_from_tile(0, 0, 0),
+            2, 2, 'uint8'
+        ),
+        'uint8', 2, 2, 'none'
+    )).count,
+    (ST_RasterSummaryStats(
+        ST_AsRaster(
+            'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
+            quadbin_from_tile(0, 0, 0),
+            2, 2, 'uint8'
+        ),
+        'uint8', 2, 2, 'none'
+    )).sum
+----
+4	4.0

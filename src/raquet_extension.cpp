@@ -21,6 +21,7 @@ void RegisterRasterStatsFunctions(ExtensionLoader &loader);
 void RegisterRegionStatsFunctions(ExtensionLoader &loader);
 void RegisterClipFunctions(ExtensionLoader &loader);
 void RegisterBandMathFunctions(ExtensionLoader &loader);
+void RegisterAsRasterFunctions(ExtensionLoader &loader);
 void RegisterMetadataFunctions(ExtensionLoader &loader);
 void RegisterRaquetTableFunctions(ExtensionLoader &loader);
 
@@ -352,6 +353,7 @@ static void LoadInternal(ExtensionLoader &loader) {
     RegisterRegionStatsFunctions(loader);
     RegisterClipFunctions(loader);
     RegisterBandMathFunctions(loader);
+    RegisterAsRasterFunctions(loader);
     RegisterMetadataFunctions(loader);
     RegisterRaquetTableFunctions(loader);
 
