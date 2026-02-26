@@ -10,7 +10,7 @@ require raquet
 
 # A 4x4 uint8 raster should produce 16 bytes
 query I
-SELECT length(ST_AsRaster(
+SELECT octet_length(ST_AsRaster(
     'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
     quadbin_from_tile(0, 0, 0),
     4, 4, 'uint8'
@@ -20,7 +20,7 @@ SELECT length(ST_AsRaster(
 
 # A 2x2 uint16 raster should produce 8 bytes (2 bytes per pixel)
 query I
-SELECT length(ST_AsRaster(
+SELECT octet_length(ST_AsRaster(
     'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
     quadbin_from_tile(0, 0, 0),
     2, 2, 'uint16'
@@ -30,7 +30,7 @@ SELECT length(ST_AsRaster(
 
 # A 2x2 float32 raster should produce 16 bytes (4 bytes per pixel)
 query I
-SELECT length(ST_AsRaster(
+SELECT octet_length(ST_AsRaster(
     'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
     quadbin_from_tile(0, 0, 0),
     2, 2, 'float32'
@@ -117,7 +117,7 @@ WHERE v = 128.0
 
 # Create a metadata-style JSON matching Raquet v0.3.0 format
 query I
-SELECT length(ST_AsRaster(
+SELECT octet_length(ST_AsRaster(
     'POLYGON((-180 -90, 180 -90, 180 90, -180 90, -180 -90))'::GEOMETRY,
     quadbin_from_tile(0, 0, 0),
     '{"compression":"none","tiling":{"block_width":4,"block_height":4},"bands":[{"name":"band_1","type":"uint8"}]}'
