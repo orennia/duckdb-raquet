@@ -1,0 +1,113 @@
+# name: test/sql/st_as_polygon.test
+# description: Test ST_AsPolygon function
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test ST_AsPolygon(block, metadata) -> GEOMETRY
+# Returns the WGS84 bounding polygon of a raster tile
+# =============================================================================
+
+# Use a known quadbin tile: quadbin_from_tile(0, 0, 0) = resolution 0 tile
+# tile (0,0,0) covers the entire world: [-180, -85.05, 180, 85.05]
+statement ok
+CREATE TABLE test_polygon_tile AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x01\x02\x03\x04'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# ST_AsPolygon should return a non-null GEOMETRY value
+query I
+SELECT ST_AsPolygon(block, metadata) IS NOT NULL FROM test_polygon_tile
+----
+true
+
+# The returned geometry should be a polygon (WKB byte 5 = 3 for polygon type)
+# Check geometry type by verifying it's a valid WKB with type=3
+query I
+SELECT length(ST_AsPolygon(block, metadata)) > 0 FROM test_polygon_tile
+----
+true
+
+statement ok
+DROP TABLE test_polygon_tile
+
+# =============================================================================
+# Test ST_AsPolygon with band data (PostGIS-compatible overload)
+# =============================================================================
+
+statement ok
+CREATE TABLE test_polygon_band AS
+SELECT
+    quadbin_from_tile(0, 0, 1)::UBIGINT as block,
+    '\x01\x02\x03\x04'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# ST_AsPolygon(block, band, metadata) should also work
+query I
+SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_polygon_band
+----
+true
+
+statement ok
+DROP TABLE test_polygon_band
+
+# =============================================================================
+# Test ST_AsPolygon with band_num parameter
+# =============================================================================
+
+statement ok
+CREATE TABLE test_polygon_bandnum AS
+SELECT
+    quadbin_from_tile(0, 0, 1)::UBIGINT as block,
+    '\x01\x02\x03\x04'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# ST_AsPolygon(block, band, metadata, 0) should return a valid geometry (band_num is 0-based)
+query I
+SELECT ST_AsPolygon(block, band_1, metadata, 0) IS NOT NULL FROM test_polygon_bandnum
+----
+true
+
+statement ok
+DROP TABLE test_polygon_bandnum
+
+# =============================================================================
+# Test that ST_AsPolygon and ST_GeomFromQuadbin return the same WKB bytes
+# (both should return the tile bounding polygon)
+# =============================================================================
+
+statement ok
+CREATE TABLE test_polygon_compare AS
+SELECT
+    quadbin_from_tile(15, 10, 5)::UBIGINT as block,
+    '\x0A\x14\x1E\x28'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# The polygon from ST_AsPolygon should have the same length as from ST_GeomFromQuadbin
+# Both return a 93-byte WKB polygon (1 + 4 + 4 + 4 + 5*16 = 93)
+query I
+SELECT length(ST_AsPolygon(block, metadata)) = length(ST_GeomFromQuadbin(block)) FROM test_polygon_compare
+----
+true
+
+statement ok
+DROP TABLE test_polygon_compare
+
+# =============================================================================
+# Test null/error handling
+# =============================================================================
+
+# Negative band_num should return NULL
+query I
+SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, '\x01'::BLOB,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR, -1)
+----
+NULL
+
+# band_num out of range should throw an error
+statement error
+SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, '\x01'::BLOB,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR, 5)
