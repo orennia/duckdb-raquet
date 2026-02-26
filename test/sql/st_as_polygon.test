@@ -6,11 +6,9 @@ require raquet
 
 # =============================================================================
 # Test ST_AsPolygon(block, metadata) -> GEOMETRY
-# Returns the WGS84 bounding polygon of a raster tile
+# No band data: always returns the full tile bounding polygon (fast path).
 # =============================================================================
 
-# Use a known quadbin tile: quadbin_from_tile(0, 0, 0) = resolution 0 tile
-# tile (0,0,0) covers the entire world: [-180, -85.05, 180, 85.05]
 statement ok
 CREATE TABLE test_polygon_tile AS
 SELECT
@@ -24,8 +22,6 @@ SELECT ST_AsPolygon(block, metadata) IS NOT NULL FROM test_polygon_tile
 ----
 true
 
-# The returned geometry should be a polygon (WKB byte 5 = 3 for polygon type)
-# Check geometry type by verifying it's a valid WKB with type=3
 query I
 SELECT length(ST_AsPolygon(block, metadata)) > 0 FROM test_polygon_tile
 ----
@@ -35,48 +31,8 @@ statement ok
 DROP TABLE test_polygon_tile
 
 # =============================================================================
-# Test ST_AsPolygon with band data (PostGIS-compatible overload)
-# =============================================================================
-
-statement ok
-CREATE TABLE test_polygon_band AS
-SELECT
-    quadbin_from_tile(0, 0, 1)::UBIGINT as block,
-    '\x01\x02\x03\x04'::BLOB as band_1,
-    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
-
-# ST_AsPolygon(block, band, metadata) should also work
-query I
-SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_polygon_band
-----
-true
-
-statement ok
-DROP TABLE test_polygon_band
-
-# =============================================================================
-# Test ST_AsPolygon with band_num parameter
-# =============================================================================
-
-statement ok
-CREATE TABLE test_polygon_bandnum AS
-SELECT
-    quadbin_from_tile(0, 0, 1)::UBIGINT as block,
-    '\x01\x02\x03\x04'::BLOB as band_1,
-    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
-
-# ST_AsPolygon(block, band, metadata, 0) should return a valid geometry (band_num is 0-based)
-query I
-SELECT ST_AsPolygon(block, band_1, metadata, 0) IS NOT NULL FROM test_polygon_bandnum
-----
-true
-
-statement ok
-DROP TABLE test_polygon_bandnum
-
-# =============================================================================
-# Test that ST_AsPolygon and ST_GeomFromQuadbin return the same WKB bytes
-# (both should return the tile bounding polygon)
+# Test ST_AsPolygon(block, metadata) matches ST_GeomFromQuadbin (2-arg, no band)
+# Both return a 93-byte WKB POLYGON (the full tile bounding box)
 # =============================================================================
 
 statement ok
@@ -86,8 +42,6 @@ SELECT
     '\x0A\x14\x1E\x28'::BLOB as band_1,
     '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
 
-# The polygon from ST_AsPolygon should have the same length as from ST_GeomFromQuadbin
-# Both return a 93-byte WKB polygon (1 + 4 + 4 + 4 + 5*16 = 93)
 query I
 SELECT length(ST_AsPolygon(block, metadata)) = length(ST_GeomFromQuadbin(block)) FROM test_polygon_compare
 ----
@@ -95,6 +49,127 @@ true
 
 statement ok
 DROP TABLE test_polygon_compare
+
+# =============================================================================
+# Test ST_AsPolygon(block, band, metadata) - no nodata defined in metadata
+# Fast path: returns same full tile bounding polygon as the 2-arg version
+# =============================================================================
+
+statement ok
+CREATE TABLE test_polygon_no_nodata AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x01\x02\x03\x04'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# No nodata defined: fast path returns full bbox as POLYGON (93 bytes = same as ST_GeomFromQuadbin)
+query I
+SELECT length(ST_AsPolygon(block, band_1, metadata)) = length(ST_GeomFromQuadbin(block))
+FROM test_polygon_no_nodata
+----
+true
+
+statement ok
+DROP TABLE test_polygon_no_nodata
+
+# =============================================================================
+# Test nodata-aware ST_AsPolygon: all pixels are nodata → NULL
+# =============================================================================
+
+# 2×2 uint8 tile, nodata=0, all pixels = 0
+statement ok
+CREATE TABLE test_all_nodata AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x00\x00\x00\x00'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8","nodata":0}]}'::VARCHAR as metadata
+
+query I
+SELECT ST_AsPolygon(block, band_1, metadata) IS NULL FROM test_all_nodata
+----
+true
+
+# Same result with explicit band_num=0
+query I
+SELECT ST_AsPolygon(block, band_1, metadata, 0) IS NULL FROM test_all_nodata
+----
+true
+
+statement ok
+DROP TABLE test_all_nodata
+
+# =============================================================================
+# Test nodata-aware ST_AsPolygon: some pixels are nodata → MULTIPOLYGON
+# The result is non-null and covers only the valid pixel area
+# =============================================================================
+
+# 2×2 uint8 tile, nodata=0, pixels: [0,0,1,1] (row0=[nodata,nodata], row1=[valid,valid])
+# Expected: single rectangle covering the bottom half of the tile
+statement ok
+CREATE TABLE test_partial_nodata AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x00\x00\x01\x01'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8","nodata":0}]}'::VARCHAR as metadata
+
+# Result is non-null (there are valid pixels)
+query I
+SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_partial_nodata
+----
+true
+
+# Result is a MULTIPOLYGON (WKB type 6), so it is larger than a simple POLYGON (93 bytes)
+# 1 polygon in multipolygon = 9 + 93 = 102 bytes
+query I
+SELECT length(ST_AsPolygon(block, band_1, metadata)) = 102 FROM test_partial_nodata
+----
+true
+
+# Explicit band_num=0 produces the same result
+query I
+SELECT length(ST_AsPolygon(block, band_1, metadata, 0)) = 102 FROM test_partial_nodata
+----
+true
+
+# The band-aware result is different from the full tile bbox (band-aware respects nodata)
+query I
+SELECT length(ST_AsPolygon(block, band_1, metadata)) != length(ST_GeomFromQuadbin(block))
+FROM test_partial_nodata
+----
+true
+
+statement ok
+DROP TABLE test_partial_nodata
+
+# =============================================================================
+# Test nodata-aware ST_AsPolygon: NaN nodata for float32
+# =============================================================================
+
+# 2×2 float32 tile, nodata=NaN
+# float32: 1.0=\x00\x00\x80\x3F, NaN=\x00\x00\xC0\x7F
+# Pixels: [1.0, NaN, 1.0, 1.0] (row0=[valid,nodata], row1=[valid,valid])
+statement ok
+CREATE TABLE test_nan_nodata_polygon AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x00\x00\x80\x3F\x00\x00\xC0\x7F\x00\x00\x80\x3F\x00\x00\x80\x3F'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"float32","nodata":"NaN"}]}'::VARCHAR as metadata
+
+# Non-null result (there are valid pixels)
+query I
+SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_nan_nodata_polygon
+----
+true
+
+# The result is smaller than the full tile (because one pixel is nodata)
+query I
+SELECT length(ST_AsPolygon(block, band_1, metadata)) != length(ST_GeomFromQuadbin(block))
+FROM test_nan_nodata_polygon
+----
+true
+
+statement ok
+DROP TABLE test_nan_nodata_polygon
 
 # =============================================================================
 # Test null/error handling
@@ -111,3 +186,11 @@ NULL
 statement error
 SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, '\x01'::BLOB,
     '{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR, 5)
+
+# Empty band blob should return NULL
+query I
+SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, ''::BLOB,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8","nodata":0}]}'::VARCHAR)
+----
+NULL
+
