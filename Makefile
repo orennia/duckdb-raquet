@@ -33,8 +33,7 @@ test: release
 	./duckdb -c "LOAD raquet; SELECT quadbin_from_tile(0,0,0);"
 
 test_sql: release
-	cd $(BUILD_DIR)/release && \
-	python3 ../../$(DUCKDB_DIR)/scripts/run_tests.py --build-dir . --test-dir ../../test/sql
+	./$(BUILD_DIR)/release/test/unittest $PWD/test/sql/**
 
 # Cleanup
 clean:
