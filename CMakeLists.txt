@@ -1,5 +1,4 @@
 cmake_minimum_required(VERSION 3.12)
-include(ExternalProject)
 
 # Set extension name here
 set(TARGET_NAME raquet)
@@ -17,7 +16,6 @@ set(EXTENSION_STATIC_BUILD 1)
 include_directories(src/include)
 
 set(RAQUET_RUST_NAME raquet_rust)
-set_directory_properties(PROPERTIES EP_PREFIX ${CMAKE_BINARY_DIR}/rust)
 
 
 set(EXTENSION_SOURCES
@@ -58,17 +56,15 @@ endif()
 
 if(NOT "${DUCKDB_EXTENSION_CONFIGS}" STREQUAL "")
     # Using DuckDB extension build system
-    ExternalProject_Add(
+    add_custom_target(
         ${RAQUET_RUST_NAME}
-        SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/rust
-        CONFIGURE_COMMAND ""
-        BUILD_IN_SOURCE 1
-        BUILD_COMMAND cargo build
-        COMMAND cargo build --release
-        BUILD_BYPRODUCTS "${CMAKE_CURRENT_LIST_DIR}/rust/target/debug/libraquet_rust.a"
-        BUILD_BYPRODUCTS "${CMAKE_CURRENT_LIST_DIR}/rust/target/release/libraquet_rust.a"
-        INSTALL_COMMAND ""
-        LOG_BUILD ON
+        COMMAND cargo build --manifest-path ${CMAKE_CURRENT_LIST_DIR}/rust/Cargo.toml
+        COMMAND cargo build --manifest-path ${CMAKE_CURRENT_LIST_DIR}/rust/Cargo.toml --release
+        BYPRODUCTS
+            "${CMAKE_CURRENT_LIST_DIR}/rust/target/debug/libraquet_rust.a"
+            "${CMAKE_CURRENT_LIST_DIR}/rust/target/release/libraquet_rust.a"
+        WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}
+        VERBATIM
     )
 
     build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
