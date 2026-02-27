@@ -1,4 +1,4 @@
-# Copilot Instructions for duckdb-raquet
+# Agent Instructions for duckdb-raquet
 
 ## Project Overview
 
