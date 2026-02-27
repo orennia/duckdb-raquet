@@ -22,6 +22,7 @@ void RegisterRegionStatsFunctions(ExtensionLoader &loader);
 void RegisterClipFunctions(ExtensionLoader &loader);
 void RegisterBandMathFunctions(ExtensionLoader &loader);
 void RegisterAsRasterFunctions(ExtensionLoader &loader);
+void RegisterAsWKBFunctions(ExtensionLoader &loader);
 void RegisterAsPolygonFunctions(ExtensionLoader &loader);
 void RegisterMetadataFunctions(ExtensionLoader &loader);
 void RegisterRaquetTableFunctions(ExtensionLoader &loader);
@@ -355,6 +356,7 @@ static void LoadInternal(ExtensionLoader &loader) {
     RegisterClipFunctions(loader);
     RegisterBandMathFunctions(loader);
     RegisterAsRasterFunctions(loader);
+    RegisterAsWKBFunctions(loader);
     RegisterAsPolygonFunctions(loader);
     RegisterMetadataFunctions(loader);
     RegisterRaquetTableFunctions(loader);

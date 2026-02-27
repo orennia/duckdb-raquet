@@ -1,0 +1,144 @@
+# name: test/sql/st_as_wkb.test
+# description: Test ST_AsWKB function - converts raster band to WKB raster binary
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test output size: header (61) + band flags (1) + pixel data
+# =============================================================================
+
+# 2x2 uint8 tile, no nodata: 61 + 1 + 4 = 66 bytes
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x0A\x14\x1E\x28'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    'uint8', 2, 2, 'none'
+))
+----
+66
+
+# 2x2 uint16 tile, no nodata: 61 + 1 + 8 = 70 bytes
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x0A\x00\x14\x00\x1E\x00\x28\x00'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    'uint16', 2, 2, 'none'
+))
+----
+70
+
+# 2x2 float32 tile, no nodata: 61 + 1 + 16 = 78 bytes
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x00\x00\x80\x3F\x00\x00\x00\x40\x00\x00\x40\x40\x00\x00\x80\x40'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    'float32', 2, 2, 'none'
+))
+----
+78
+
+# 2x2 float64 tile, no nodata: 61 + 1 + 32 = 94 bytes
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x00\x00\x00\x00\x00\x00\xF0\x3F\x00\x00\x00\x00\x00\x00\x00\x40\x00\x00\x00\x00\x00\x00\x08\x40\x00\x00\x00\x00\x00\x00\x10\x40'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    'float64', 2, 2, 'none'
+))
+----
+94
+
+# =============================================================================
+# Test output size with nodata: adds one pixel-sized nodata value
+# =============================================================================
+
+# 2x2 uint8 with nodata: 61 + 1 + 1 (nodata byte) + 4 = 67 bytes
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x0A\x14\x1E\x28'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    'uint8', 2, 2, 'none', 255.0
+))
+----
+67
+
+# 2x2 float32 with nodata: 61 + 1 + 4 (nodata float32) + 16 = 82 bytes
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x00\x00\x80\x3F\x00\x00\x00\x40\x00\x00\x40\x40\x00\x00\x80\x40'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    'float32', 2, 2, 'none', -9999.0
+))
+----
+82
+
+# =============================================================================
+# Test metadata-aware overload
+# =============================================================================
+
+# Metadata overload produces the same byte count as explicit overload
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x0A\x14\x1E\x28'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'
+))
+----
+66
+
+# Metadata with nodata: adds nodata byte
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x0A\x14\x1E\x28'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8","nodata":0}]}'
+))
+----
+67
+
+# Metadata with float32 band
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x00\x00\x80\x3F\x00\x00\x00\x40\x00\x00\x40\x40\x00\x00\x80\x40'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"float32"}]}'
+))
+----
+78
+
+# =============================================================================
+# Test metadata with band_index overload
+# =============================================================================
+
+# Band index 0 on a two-band metadata uses the first band type (uint8)
+query I
+SELECT octet_length(ST_AsWKB(
+    '\x0A\x14\x1E\x28'::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"},{"name":"band_2","type":"float32"}]}',
+    0
+))
+----
+66
+
+# =============================================================================
+# Test NULL handling
+# =============================================================================
+
+query I
+SELECT ST_AsWKB(
+    NULL::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    'uint8', 2, 2, 'none'
+)
+----
+NULL
+
+query I
+SELECT ST_AsWKB(
+    NULL::BLOB,
+    quadbin_from_tile(0, 0, 0),
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'
+)
+----
+NULL
