@@ -1,0 +1,190 @@
+# name: test/sql/st_as_polygon.test
+# description: Test ST_AsPolygon function
+# group: [raquet]
+
+require raquet
+
+# =============================================================================
+# Test ST_AsPolygon(block, metadata) -> GEOMETRY
+# No band data: always returns the full tile bounding polygon (fast path).
+# =============================================================================
+
+statement ok
+CREATE TABLE test_polygon_tile AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x01\x02\x03\x04'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# ST_AsPolygon should return a non-null GEOMETRY value
+query I
+SELECT ST_AsPolygon(block, metadata) IS NOT NULL FROM test_polygon_tile
+----
+true
+
+query I
+SELECT contains(ST_AsText(ST_AsPolygon(block, metadata)),'POLYGON') FROM test_polygon_tile
+----
+true
+
+statement ok
+DROP TABLE test_polygon_tile
+
+# =============================================================================
+# Test ST_AsPolygon(block, metadata) matches ST_GeomFromQuadbin (2-arg, no band)
+# Both return a 93-byte WKB POLYGON (the full tile bounding box)
+# =============================================================================
+
+statement ok
+CREATE TABLE test_polygon_compare AS
+SELECT
+    quadbin_from_tile(15, 10, 5)::UBIGINT as block,
+    '\x0A\x14\x1E\x28'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+query I
+SELECT ST_AsText(ST_AsPolygon(block, metadata)) = ST_AsText(ST_GeomFromQuadbin(block)) FROM test_polygon_compare
+----
+true
+
+statement ok
+DROP TABLE test_polygon_compare
+
+# =============================================================================
+# Test ST_AsPolygon(block, band, metadata) - no nodata defined in metadata
+# Fast path: returns same full tile bounding polygon as the 2-arg version
+# =============================================================================
+
+statement ok
+CREATE TABLE test_polygon_no_nodata AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x01\x02\x03\x04'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
+
+# No nodata defined: fast path returns full bbox as POLYGON (same type as ST_GeomFromQuadbin)
+query I
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata)),'POLYGON')
+FROM test_polygon_no_nodata
+----
+true
+
+statement ok
+DROP TABLE test_polygon_no_nodata
+
+# =============================================================================
+# Test nodata-aware ST_AsPolygon: all pixels are nodata → NULL
+# =============================================================================
+
+# 2×2 uint8 tile, nodata=0, all pixels = 0
+statement ok
+CREATE TABLE test_all_nodata AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x00\x00\x00\x00'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8","nodata":0}]}'::VARCHAR as metadata
+
+query I
+SELECT ST_AsPolygon(block, band_1, metadata) IS NULL FROM test_all_nodata
+----
+true
+
+# Same result with explicit band_num=0
+query I
+SELECT ST_AsPolygon(block, band_1, metadata, 0) IS NULL FROM test_all_nodata
+----
+true
+
+statement ok
+DROP TABLE test_all_nodata
+
+# =============================================================================
+# Test nodata-aware ST_AsPolygon: some pixels are nodata → MULTIPOLYGON
+# The result is non-null and covers only the valid pixel area
+# =============================================================================
+
+# 2×2 uint8 tile, nodata=0, pixels: [0,0,1,1] (row0=[nodata,nodata], row1=[valid,valid])
+# Expected: single rectangle covering the bottom half of the tile
+statement ok
+CREATE TABLE test_partial_nodata AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x00\x00\x01\x01'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8","nodata":0}]}'::VARCHAR as metadata
+
+# Result is non-null (there are valid pixels)
+query I
+SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_partial_nodata
+----
+true
+
+# Result is a MULTIPOLYGON (WKB type 6), not a simple POLYGON
+query I
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata)),'MULTIPOLYGON') FROM test_partial_nodata
+----
+true
+
+# Explicit band_num=0 produces the same result
+query I
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata, 0)),'MULTIPOLYGON') FROM test_partial_nodata
+----
+true
+
+statement ok
+DROP TABLE test_partial_nodata
+
+# =============================================================================
+# Test nodata-aware ST_AsPolygon: NaN nodata for float32
+# =============================================================================
+
+# 2×2 float32 tile, nodata=NaN
+# float32: 1.0=\x00\x00\x80\x3F, NaN=\x00\x00\xC0\x7F
+# Pixels: [1.0, NaN, 1.0, 1.0] (row0=[valid,nodata], row1=[valid,valid])
+statement ok
+CREATE TABLE test_nan_nodata_polygon AS
+SELECT
+    quadbin_from_tile(0, 0, 0)::UBIGINT as block,
+    '\x00\x00\x80\x3F\x00\x00\xC0\x7F\x00\x00\x80\x3F\x00\x00\x80\x3F'::BLOB as band_1,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"float32","nodata":"NaN"}]}'::VARCHAR as metadata
+
+# Non-null result (there are valid pixels)
+query I
+SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_nan_nodata_polygon
+----
+true
+
+# The result is a MULTIPOLYGON (not a simple POLYGON), because one pixel is nodata
+query I
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata)),'MULTIPOLYGON')
+FROM test_nan_nodata_polygon
+----
+true
+
+statement ok
+DROP TABLE test_nan_nodata_polygon
+
+# =============================================================================
+# Test null/error handling
+# =============================================================================
+
+# Negative band_num should return NULL
+query I
+SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, '\x01'::BLOB,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR, -1)
+----
+NULL
+
+# band_num out of range should throw an error
+statement error
+SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, '\x01'::BLOB,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR, 5)
+----
+Invalid Input Error: ST_AsPolygon: band_num 5 is out of range (raster has 1 band(s))
+
+# Empty band blob should return NULL
+query I
+SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, ''::BLOB,
+    '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8","nodata":0}]}'::VARCHAR)
+----
+NULL
+
