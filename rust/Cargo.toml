@@ -1,0 +1,8 @@
+[package]
+name = "raquet_rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "raquet_rust"
+crate-type = ["staticlib"]

@@ -22,6 +22,7 @@ Thumbs.db
 *.so
 *.dylib
 *.dll
+rust/target/
 
 # Test artifacts
 *.log

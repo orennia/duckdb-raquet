@@ -22,6 +22,9 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y cmake ninja-build zlib1g-dev
 
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+
     - name: Build extension (Release)
       run: |
         make release
@@ -50,6 +53,9 @@ jobs:
     - name: Install dependencies
       run: |
         brew install cmake ninja
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Build extension (Release)
       run: |
@@ -81,6 +87,9 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y cmake ninja-build zlib1g-dev curl
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
 
     - name: Build extension
       run: |

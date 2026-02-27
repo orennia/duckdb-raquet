@@ -13,6 +13,8 @@
 
 namespace duckdb {
 
+extern "C" const char *raquet_rust_version();
+
 // Forward declarations for function registration
 void RegisterQuadbinFunctions(ExtensionLoader &loader);
 void RegisterPolyfillFunctions(ExtensionLoader &loader);
@@ -394,7 +396,8 @@ std::string RaquetExtension::Version() const {
 #ifdef EXT_VERSION_RAQUET
     return EXT_VERSION_RAQUET;
 #else
-    return "0.1.0";
+    auto rust_version = raquet_rust_version();
+    return rust_version ? rust_version : "0.1.0";
 #endif
 }
 

@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 3.12)
+include(ExternalProject)
 
 # Set extension name here
 set(TARGET_NAME raquet)
@@ -14,6 +15,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(EXTENSION_STATIC_BUILD 1)
 
 include_directories(src/include)
+
+set(RAQUET_RUST_NAME raquet_rust)
+set_directory_properties(PROPERTIES EP_PREFIX ${CMAKE_BINARY_DIR}/rust)
 
 
 set(EXTENSION_SOURCES
@@ -54,8 +58,29 @@ endif()
 
 if(NOT "${DUCKDB_EXTENSION_CONFIGS}" STREQUAL "")
     # Using DuckDB extension build system
+    ExternalProject_Add(
+        ${RAQUET_RUST_NAME}
+        SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}/rust
+        CONFIGURE_COMMAND ""
+        BUILD_IN_SOURCE 1
+        BUILD_COMMAND cargo build
+        COMMAND cargo build --release
+        BUILD_BYPRODUCTS "${CMAKE_CURRENT_LIST_DIR}/rust/target/debug/libraquet_rust.a"
+        BUILD_BYPRODUCTS "${CMAKE_CURRENT_LIST_DIR}/rust/target/release/libraquet_rust.a"
+        INSTALL_COMMAND ""
+        LOG_BUILD ON
+    )
+
     build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
     build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
+    add_dependencies(${EXTENSION_NAME} ${RAQUET_RUST_NAME})
+    add_dependencies(${LOADABLE_EXTENSION_NAME} ${RAQUET_RUST_NAME})
+    target_link_libraries(${EXTENSION_NAME}
+                          debug "${CMAKE_CURRENT_LIST_DIR}/rust/target/debug/libraquet_rust.a"
+                          optimized "${CMAKE_CURRENT_LIST_DIR}/rust/target/release/libraquet_rust.a")
+    target_link_libraries(${LOADABLE_EXTENSION_NAME}
+                          debug "${CMAKE_CURRENT_LIST_DIR}/rust/target/debug/libraquet_rust.a"
+                          optimized "${CMAKE_CURRENT_LIST_DIR}/rust/target/release/libraquet_rust.a")
     target_link_libraries(${EXTENSION_NAME} ZLIB::ZLIB)
     target_link_libraries(${LOADABLE_EXTENSION_NAME} ZLIB::ZLIB)
 

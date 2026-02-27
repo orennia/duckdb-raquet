@@ -74,6 +74,7 @@ LOAD raquet;
 **Prerequisites:**
 - CMake 3.12+
 - C++17 compatible compiler
+- Rust toolchain (cargo + rustc)
 - zlib (for gzip decompression)
 - libjpeg (optional, for JPEG lossy compression - v0.4.0)
 - libwebp (optional, for WebP lossy compression - v0.4.0)
