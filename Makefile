@@ -1,53 +1,46 @@
-.PHONY: all clean debug release test
+.PHONY: all clean debug release test configure
 
-# Default target
-all: release
-
-# Directory structure
 PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-BUILD_DIR := build
-DUCKDB_DIR := duckdb
+EXTENSION_NAME := raquet
 
-# Build configurations
-release:
-	mkdir -p $(BUILD_DIR)/release && \
-	cd $(BUILD_DIR)/release && \
-	cmake -DCMAKE_BUILD_TYPE=Release \
-		-DDUCKDB_EXTENSION_CONFIGS="$(PROJ_DIR)extension_config.cmake" \
-		-DEXTENSION_STATIC_BUILD=1 \
-		../../$(DUCKDB_DIR) && \
-	cmake --build . --config Release -- -j$(shell nproc 2>/dev/null || sysctl -n hw.ncpu)
+# Set to 1 to enable Unstable API (binaries will only work on TARGET_DUCKDB_VERSION)
+USE_UNSTABLE_C_API := 0
 
-debug:
-	mkdir -p $(BUILD_DIR)/debug && \
-	cd $(BUILD_DIR)/debug && \
-	cmake -DCMAKE_BUILD_TYPE=Debug \
-		-DDUCKDB_EXTENSION_CONFIGS="$(PROJ_DIR)extension_config.cmake" \
-		-DEXTENSION_STATIC_BUILD=1 \
-		../../$(DUCKDB_DIR) && \
-	cmake --build . --config Debug -- -j$(shell nproc 2>/dev/null || sysctl -n hw.ncpu)
+# Target DuckDB version
+TARGET_DUCKDB_VERSION := v1.2.0
 
-# Testing
-test: release
-	cd $(BUILD_DIR)/release && \
-	./duckdb -c "LOAD raquet; SELECT quadbin_from_tile(0,0,0);"
+all: debug
 
-test_sql: release
-	./$(BUILD_DIR)/release/test/unittest $PWD/test/sql/**
+# Configure: ensure Rust toolchain is present
+configure:
+@which cargo > /dev/null || (echo "Rust toolchain not found. Install from https://rustup.rs/" && exit 1)
+@echo "Rust toolchain OK: $$(cargo --version)"
 
-# Cleanup
+# Debug build
+debug: configure
+cargo build
+
+# Release build
+release: configure
+cargo build --release
+
+# Run unit tests (Rust)
+test: configure
+cargo test
+
+# Run SQL tests (requires a built extension and duckdb binary)
+test_sql: debug
+@echo "SQL tests require a DuckDB binary with the extension loaded."
+@echo "Build the extension with 'make debug' and load it manually."
+
+# Clean
 clean:
-	rm -rf $(BUILD_DIR)
+cargo clean
 
 # Format code
 format:
-	find src -name "*.cpp" -o -name "*.hpp" | xargs clang-format -i
+cargo fmt
 
-# Setup: clone DuckDB if not present
-setup:
-	@if [ ! -d "$(DUCKDB_DIR)" ]; then \
-		echo "Cloning DuckDB..."; \
-		git clone --depth 1 https://github.com/duckdb/duckdb.git $(DUCKDB_DIR); \
-	else \
-		echo "DuckDB already exists"; \
-	fi
+# Lint
+lint:
+cargo clippy

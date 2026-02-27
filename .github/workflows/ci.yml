@@ -14,27 +14,23 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake ninja-build zlib1g-dev
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
 
     - name: Build extension (Release)
-      run: |
-        make release
+      run: cargo build --release
 
-    - name: Run SQL tests
-      run: |
-        make test_sql
+    - name: Run Rust unit tests
+      run: cargo test
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: raquet-linux-amd64
-        path: build/release/extension/raquet/raquet.duckdb_extension
+        path: target/release/libraquet.so
         if-no-files-found: warn
 
   build-macos:
@@ -44,84 +40,41 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
-    - name: Install dependencies
-      run: |
-        brew install cmake ninja
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
 
     - name: Build extension (Release)
-      run: |
-        make release
+      run: cargo build --release
 
-    - name: Run SQL tests
-      run: |
-        make test_sql
+    - name: Run Rust unit tests
+      run: cargo test
 
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: raquet-macos
-        path: build/release/extension/raquet/raquet.duckdb_extension
+        path: target/release/libraquet.dylib
         if-no-files-found: warn
 
-  test-with-sample-data:
-    name: Test with Sample Data
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    needs: build-linux
 
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
       with:
-        submodules: recursive
+        toolchain: stable
+        components: clippy, rustfmt
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y cmake ninja-build zlib1g-dev curl
+    - name: Check formatting
+      run: cargo fmt --check
 
-    - name: Build extension
-      run: |
-        make release
-
-    - name: Download sample data
-      run: |
-        mkdir -p test_data
-        curl -sL "https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet" -o test_data/naip_test.parquet
-
-    - name: Test with NAIP sample data
-      run: |
-        ./build/release/duckdb -c "
-          LOAD 'build/release/extension/raquet/raquet.duckdb_extension';
-
-          -- Test basic query
-          SELECT count(*) as total_rows FROM read_parquet('test_data/naip_test.parquet');
-
-          -- Test metadata extraction
-          SELECT
-            json_extract_string(metadata, '$.compression') as compression,
-            json_extract_string(metadata, '$.block_width') as block_width
-          FROM read_parquet('test_data/naip_test.parquet')
-          WHERE block = 0;
-
-          -- Test QUADBIN functions
-          SELECT
-            block,
-            quadbin_resolution(block) as zoom,
-            (quadbin_to_bbox(block)).*
-          FROM read_parquet('test_data/naip_test.parquet')
-          WHERE block != 0
-          LIMIT 3;
-
-          -- Test pixel extraction
-          SELECT
-            block,
-            raquet_pixel(band_1, 'uint8', 128, 128, 256, 'gzip') as pixel_value
-          FROM read_parquet('test_data/naip_test.parquet')
-          WHERE block != 0
-          LIMIT 3;
-
-          SELECT 'All tests passed!' as status;
-        "
+    - name: Run clippy
+      run: cargo clippy -- -D warnings

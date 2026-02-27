@@ -2,6 +2,9 @@
 build/
 cmake-build-*/
 
+# Rust build artifacts
+target/
+
 # DuckDB source (submodule or clone)
 duckdb/
 

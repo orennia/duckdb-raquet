@@ -72,34 +72,34 @@ LOAD raquet;
 ### Building from Source
 
 **Prerequisites:**
-- CMake 3.12+
-- C++17 compatible compiler
-- zlib (for gzip decompression)
-- libjpeg (optional, for JPEG lossy compression - v0.4.0)
-- libwebp (optional, for WebP lossy compression - v0.4.0)
+- [Rust toolchain](https://rustup.rs/) (1.70+)
 
 ```bash
 # Clone the repository
 git clone https://github.com/CartoDB/duckdb-raquet.git
 cd duckdb-raquet
 
-# Initialize DuckDB submodule
-git submodule update --init --recursive
-
 # Build release version
 make release
+# or equivalently:
+cargo build --release
 
 # Run tests
 make test
+# or equivalently:
+cargo test
 ```
 
 **Build Targets:**
-- `make release` - Build optimized release version
-- `make debug` - Build with debug symbols
-- `make test` - Run basic functionality test
-- `make test_sql` - Run SQL test suite
-- `make clean` - Clean build artifacts
-- `make format` - Run clang-format on source files
+- `make release` / `cargo build --release` - Build optimized release version
+- `make debug` / `cargo build` - Build with debug symbols
+- `make test` / `cargo test` - Run Rust unit tests
+- `make clean` / `cargo clean` - Clean build artifacts
+- `make format` / `cargo fmt` - Format Rust source files
+- `make lint` / `cargo clippy` - Run Rust linter
+
+The compiled extension is placed at `target/release/libraquet.so` (Linux),
+`target/release/libraquet.dylib` (macOS), or `target/release/raquet.dll` (Windows).
 
 ## Quick Start
 

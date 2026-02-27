@@ -1,0 +1,23 @@
+[package]
+name = "raquet"
+version = "0.5.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = true
+strip = true
+
+[[example]]
+# src/wasm_lib.rs forwards to src/lib.rs so that the crate-type can be
+# overridden from cdylib (for native builds) to staticlib (for wasm via emcc)
+name = "raquet"
+path = "src/wasm_lib.rs"
+crate-type = ["staticlib"]
+
+[dependencies]
+duckdb = { version = "1.4.3", features = ["vtab-loadable"] }
+libduckdb-sys = { version = "1.4.3", features = ["loadable-extension"] }
+flate2 = "1.1"
