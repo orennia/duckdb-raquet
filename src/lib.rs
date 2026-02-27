@@ -86,3 +86,14 @@ pub extern "C" fn raquet_init_c_api(
         }
     }
 }
+
+// When loading by full path (e.g. LOAD 'target/debug/libraquet.so'), DuckDB
+// uses the file's base name ("libraquet") to construct the function name.
+// Export the alias so both `LOAD raquet` and `LOAD '.../libraquet.so'` work.
+#[unsafe(no_mangle)]
+pub extern "C" fn libraquet_init_c_api(
+    info: ffi::duckdb_extension_info,
+    access: *const ffi::duckdb_extension_access,
+) -> bool {
+    raquet_init_c_api(info, access)
+}
