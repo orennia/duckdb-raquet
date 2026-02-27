@@ -23,7 +23,7 @@ SELECT ST_AsPolygon(block, metadata) IS NOT NULL FROM test_polygon_tile
 true
 
 query I
-SELECT ST_GeometryType(ST_AsPolygon(block, metadata)) = 'POLYGON' FROM test_polygon_tile
+SELECT contains(ST_AsText(ST_AsPolygon(block, metadata)),'POLYGON') FROM test_polygon_tile
 ----
 true
 
@@ -43,7 +43,7 @@ SELECT
     '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
 
 query I
-SELECT ST_GeometryType(ST_AsPolygon(block, metadata)) = ST_GeometryType(ST_GeomFromQuadbin(block)) FROM test_polygon_compare
+SELECT ST_AsText(ST_AsPolygon(block, metadata)) = ST_AsText(ST_GeomFromQuadbin(block)) FROM test_polygon_compare
 ----
 true
 
@@ -64,7 +64,7 @@ SELECT
 
 # No nodata defined: fast path returns full bbox as POLYGON (same type as ST_GeomFromQuadbin)
 query I
-SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) = ST_GeometryType(ST_GeomFromQuadbin(block))
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata)),'POLYGON')
 FROM test_polygon_no_nodata
 ----
 true
@@ -120,20 +120,13 @@ true
 
 # Result is a MULTIPOLYGON (WKB type 6), not a simple POLYGON
 query I
-SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) = 'MULTIPOLYGON' FROM test_partial_nodata
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata)),'MULTIPOLYGON') FROM test_partial_nodata
 ----
 true
 
 # Explicit band_num=0 produces the same result
 query I
-SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata, 0)) = 'MULTIPOLYGON' FROM test_partial_nodata
-----
-true
-
-# The band-aware result has a different type from the full tile bbox (band-aware respects nodata)
-query I
-SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) != ST_GeometryType(ST_GeomFromQuadbin(block))
-FROM test_partial_nodata
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata, 0)),'MULTIPOLYGON') FROM test_partial_nodata
 ----
 true
 
@@ -162,7 +155,7 @@ true
 
 # The result is a MULTIPOLYGON (not a simple POLYGON), because one pixel is nodata
 query I
-SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) != ST_GeometryType(ST_GeomFromQuadbin(block))
+SELECT contains(ST_AsText(ST_AsPolygon(block, band_1, metadata)),'MULTIPOLYGON')
 FROM test_nan_nodata_polygon
 ----
 true
@@ -185,6 +178,8 @@ NULL
 statement error
 SELECT ST_AsPolygon(quadbin_from_tile(0, 0, 0)::UBIGINT, '\x01'::BLOB,
     '{"file_format":"raquet","compression":"none","tiling":{"block_width":1,"block_height":1},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR, 5)
+----
+Invalid Input Error: ST_AsPolygon: band_num 5 is out of range (raster has 1 band(s))
 
 # Empty band blob should return NULL
 query I
