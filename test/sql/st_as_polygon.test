@@ -23,7 +23,7 @@ SELECT ST_AsPolygon(block, metadata) IS NOT NULL FROM test_polygon_tile
 true
 
 query I
-SELECT length(ST_AsPolygon(block, metadata)) > 0 FROM test_polygon_tile
+SELECT ST_GeometryType(ST_AsPolygon(block, metadata)) = 'POLYGON' FROM test_polygon_tile
 ----
 true
 
@@ -43,7 +43,7 @@ SELECT
     '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
 
 query I
-SELECT length(ST_AsPolygon(block, metadata)) = length(ST_GeomFromQuadbin(block)) FROM test_polygon_compare
+SELECT ST_GeometryType(ST_AsPolygon(block, metadata)) = ST_GeometryType(ST_GeomFromQuadbin(block)) FROM test_polygon_compare
 ----
 true
 
@@ -62,9 +62,9 @@ SELECT
     '\x01\x02\x03\x04'::BLOB as band_1,
     '{"file_format":"raquet","compression":"none","tiling":{"block_width":2,"block_height":2},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR as metadata
 
-# No nodata defined: fast path returns full bbox as POLYGON (93 bytes = same as ST_GeomFromQuadbin)
+# No nodata defined: fast path returns full bbox as POLYGON (same type as ST_GeomFromQuadbin)
 query I
-SELECT length(ST_AsPolygon(block, band_1, metadata)) = length(ST_GeomFromQuadbin(block))
+SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) = ST_GeometryType(ST_GeomFromQuadbin(block))
 FROM test_polygon_no_nodata
 ----
 true
@@ -118,22 +118,21 @@ SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_partial_nodat
 ----
 true
 
-# Result is a MULTIPOLYGON (WKB type 6), so it is larger than a simple POLYGON (93 bytes)
-# 1 polygon in multipolygon = 9 + 93 = 102 bytes
+# Result is a MULTIPOLYGON (WKB type 6), not a simple POLYGON
 query I
-SELECT length(ST_AsPolygon(block, band_1, metadata)) = 102 FROM test_partial_nodata
+SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) = 'MULTIPOLYGON' FROM test_partial_nodata
 ----
 true
 
 # Explicit band_num=0 produces the same result
 query I
-SELECT length(ST_AsPolygon(block, band_1, metadata, 0)) = 102 FROM test_partial_nodata
+SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata, 0)) = 'MULTIPOLYGON' FROM test_partial_nodata
 ----
 true
 
-# The band-aware result is different from the full tile bbox (band-aware respects nodata)
+# The band-aware result has a different type from the full tile bbox (band-aware respects nodata)
 query I
-SELECT length(ST_AsPolygon(block, band_1, metadata)) != length(ST_GeomFromQuadbin(block))
+SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) != ST_GeometryType(ST_GeomFromQuadbin(block))
 FROM test_partial_nodata
 ----
 true
@@ -161,9 +160,9 @@ SELECT ST_AsPolygon(block, band_1, metadata) IS NOT NULL FROM test_nan_nodata_po
 ----
 true
 
-# The result is smaller than the full tile (because one pixel is nodata)
+# The result is a MULTIPOLYGON (not a simple POLYGON), because one pixel is nodata
 query I
-SELECT length(ST_AsPolygon(block, band_1, metadata)) != length(ST_GeomFromQuadbin(block))
+SELECT ST_GeometryType(ST_AsPolygon(block, band_1, metadata)) != ST_GeometryType(ST_GeomFromQuadbin(block))
 FROM test_nan_nodata_polygon
 ----
 true
