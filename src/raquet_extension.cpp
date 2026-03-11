@@ -39,22 +39,21 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
         WHERE block != 0
      )"},
 
-    // 2-arg: Spatial filter with auto-detected resolution
+    // 2-arg: Spatial filter with auto-detected max resolution
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM read_parquet(file)),
         file_resolution AS (
-            SELECT quadbin_resolution(block) AS res
+            SELECT MAX(quadbin_resolution(block)) AS res
             FROM src
             WHERE block != 0
-            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0) AS metadata
         )
         FROM src
         WHERE block IN (
-            SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution)))
+            SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects'))
         )
         AND block != 0
      )"},
@@ -67,7 +66,7 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
             (SELECT metadata FROM src WHERE block = 0) AS metadata
         )
         FROM src
-        WHERE block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution)))
+        WHERE block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
           AND block != 0
      )"},
 
@@ -105,22 +104,21 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
         WHERE block != 0
      )"},
 
-    // 2-arg: Spatial filter with auto-detected resolution
+    // 2-arg: Spatial filter with auto-detected max resolution
     {DEFAULT_SCHEMA, "ST_Raster", {"tbl", "geometry", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM query_table(tbl)),
         table_resolution AS (
-            SELECT quadbin_resolution(block::UBIGINT) AS res
+            SELECT MAX(quadbin_resolution(block::UBIGINT)) AS res
             FROM src
             WHERE block != 0
-            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0) AS metadata
         )
         FROM src
         WHERE block::UBIGINT IN (
-            SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution)))
+            SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects'))
         )
         AND block != 0
      )"},
@@ -133,7 +131,7 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
             (SELECT metadata FROM src WHERE block = 0) AS metadata
         )
         FROM src
-        WHERE block::UBIGINT IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution)))
+        WHERE block::UBIGINT IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
           AND block != 0
      )"},
 
@@ -145,15 +143,14 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
 // Usage: SELECT * FROM ST_RasterAt('demo_catalog.portolan.modis_lst_spain', lon, lat)
 // Note: Table name must be passed as a string (uses query_table internally)
 static const DefaultTableMacro RAQUET_TABLE_AT_MACROS[] = {
-    // 2-arg: Point query with geometry and auto-detected resolution
+    // 2-arg: Point query with geometry and auto-detected max resolution
     {DEFAULT_SCHEMA, "ST_RasterAt", {"tbl", "point", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM query_table(tbl)),
         table_resolution AS (
-            SELECT quadbin_resolution(block::UBIGINT) AS res
+            SELECT MAX(quadbin_resolution(block::UBIGINT)) AS res
             FROM src
             WHERE block != 0
-            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0) AS metadata
@@ -162,15 +159,14 @@ static const DefaultTableMacro RAQUET_TABLE_AT_MACROS[] = {
         WHERE block::UBIGINT = quadbin_from_lonlat(ST_X(point), ST_Y(point), (SELECT res FROM table_resolution))
      )"},
 
-    // 3-arg: Point query with lon/lat and auto-detected resolution
+    // 3-arg: Point query with lon/lat and auto-detected max resolution
     {DEFAULT_SCHEMA, "ST_RasterAt", {"tbl", "lon", "lat", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM query_table(tbl)),
         table_resolution AS (
-            SELECT quadbin_resolution(block::UBIGINT) AS res
+            SELECT MAX(quadbin_resolution(block::UBIGINT)) AS res
             FROM src
             WHERE block != 0
-            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0) AS metadata
@@ -199,16 +195,15 @@ static const DefaultTableMacro RAQUET_TABLE_AT_MACROS[] = {
 // This is optimized for single-point queries and returns exactly one row
 // Supports both lon/lat and geometry parameters
 static const DefaultTableMacro RAQUET_AT_TABLE_MACROS[] = {
-    // 2-arg: Point query with geometry and auto-detected resolution
+    // 2-arg: Point query with geometry and auto-detected max resolution
     // Usage: SELECT ... FROM read_raquet_at('file.parquet', ST_Point(lon, lat))
     {DEFAULT_SCHEMA, "read_raquet_at", {"file", "point", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM read_parquet(file)),
         file_resolution AS (
-            SELECT quadbin_resolution(block) AS res
+            SELECT MAX(quadbin_resolution(block)) AS res
             FROM src
             WHERE block != 0
-            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0) AS metadata
@@ -217,16 +212,15 @@ static const DefaultTableMacro RAQUET_AT_TABLE_MACROS[] = {
         WHERE block = quadbin_from_lonlat(ST_X(point), ST_Y(point), (SELECT res FROM file_resolution))
      )"},
 
-    // 3-arg: Point query with lon/lat and auto-detected resolution
+    // 3-arg: Point query with lon/lat and auto-detected max resolution
     // Usage: SELECT ... FROM read_raquet_at('file.parquet', lon, lat)
     {DEFAULT_SCHEMA, "read_raquet_at", {"file", "lon", "lat", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM read_parquet(file)),
         file_resolution AS (
-            SELECT quadbin_resolution(block) AS res
+            SELECT MAX(quadbin_resolution(block)) AS res
             FROM src
             WHERE block != 0
-            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0) AS metadata
