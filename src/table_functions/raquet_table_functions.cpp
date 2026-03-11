@@ -73,6 +73,40 @@ static void RaquetParseMetadataFunction(DataChunk &args, ExpressionState &state,
     result.SetVectorType(VectorType::FLAT_VECTOR);
 }
 
+// ST_Band(metadata VARCHAR, band_name VARCHAR) -> INTEGER
+// Returns the 0-based band index for a given band name, or NULL if not found
+static void STBandFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+    args.data[0].Flatten(args.size());
+    args.data[1].Flatten(args.size());
+
+    auto metadata_data = FlatVector::GetData<string_t>(args.data[0]);
+    auto band_name_data = FlatVector::GetData<string_t>(args.data[1]);
+    auto result_data = FlatVector::GetData<int32_t>(result);
+    auto &result_mask = FlatVector::Validity(result);
+
+    for (idx_t i = 0; i < args.size(); i++) {
+        auto metadata_str = metadata_data[i].GetString();
+        auto band_name = band_name_data[i].GetString();
+
+        if (metadata_str.empty() || band_name.empty()) {
+            result_mask.SetInvalid(i);
+            continue;
+        }
+
+        try {
+            auto meta = raquet::parse_metadata(metadata_str);
+            int idx = meta.get_band_index(band_name);
+            if (idx < 0) {
+                result_mask.SetInvalid(i);
+            } else {
+                result_data[i] = idx;
+            }
+        } catch (...) {
+            result_mask.SetInvalid(i);
+        }
+    }
+}
+
 void RegisterRaquetTableFunctions(ExtensionLoader &loader) {
     // Note: read_raquet() table macro is registered in raquet_extension.cpp
 
@@ -101,6 +135,13 @@ void RegisterRaquetTableFunctions(ExtensionLoader &loader) {
         LogicalType::STRUCT(meta_struct),
         RaquetParseMetadataFunction);
     loader.RegisterFunction(parse_metadata_fn);
+
+    // ST_Band(metadata, band_name) -> INTEGER
+    ScalarFunction band_fn("ST_Band",
+        {LogicalType::VARCHAR, LogicalType::VARCHAR},
+        LogicalType::INTEGER,
+        STBandFunction);
+    loader.RegisterFunction(band_fn);
 
 }
 

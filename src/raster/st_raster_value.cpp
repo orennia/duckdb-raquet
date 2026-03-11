@@ -441,10 +441,10 @@ static void STRasterValueWithGeometryFunction(DataChunk &args, ExpressionState &
     }
 }
 
-// ST_RasterValue(block UBIGINT, band BLOB, point GEOMETRY, metadata VARCHAR, band_index INT) -> DOUBLE
-// Get pixel value at point geometry with explicit band index (for multi-band rasters)
+// ST_RasterValue(block UBIGINT, band BLOB, point GEOMETRY, metadata VARCHAR, band_name VARCHAR) -> DOUBLE
+// Get pixel value at point geometry with band name (for multi-band rasters)
 // Auto-detects interleaved vs sequential layout from metadata
-static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+static void STRasterValueWithGeometryAndBandNameFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     args.data[0].Flatten(args.size());
     args.data[1].Flatten(args.size());
     args.data[2].Flatten(args.size());
@@ -455,7 +455,7 @@ static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, Expression
     auto band_data = FlatVector::GetData<string_t>(args.data[1]);
     auto geom_data = FlatVector::GetData<string_t>(args.data[2]);
     auto metadata_data = FlatVector::GetData<string_t>(args.data[3]);
-    auto band_idx_data = FlatVector::GetData<int32_t>(args.data[4]);
+    auto band_name_data = FlatVector::GetData<string_t>(args.data[4]);
     auto result_data = FlatVector::GetData<double>(result);
     auto &result_mask = FlatVector::Validity(result);
 
@@ -464,9 +464,9 @@ static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, Expression
         auto band = band_data[i];
         auto geom = geom_data[i];
         auto metadata_str = metadata_data[i].GetString();
-        auto band_idx = band_idx_data[i];
+        auto band_name = band_name_data[i].GetString();
 
-        if (band.GetSize() == 0 || band_idx < 0) {
+        if (band.GetSize() == 0) {
             result_mask.SetInvalid(i);
             continue;
         }
@@ -479,6 +479,14 @@ static void STRasterValueWithGeometryAndBandFunction(DataChunk &args, Expression
 
         try {
             auto meta = raquet::parse_metadata(metadata_str);
+
+            // Resolve band name to index
+            int band_idx = meta.get_band_index(band_name);
+            if (band_idx < 0) {
+                result_mask.SetInvalid(i);
+                continue;
+            }
+
             std::string dtype = meta.get_band_type(band_idx);
             int tile_size = meta.block_width;
 
@@ -641,12 +649,12 @@ void RegisterRasterValueFunctions(ExtensionLoader &loader) {
         STRasterValueWithGeometryFunction);
     loader.RegisterFunction(raster_value_geom_fn);
 
-    // ST_RasterValue(block, band, point_geometry, metadata, band_index) -> DOUBLE
+    // ST_RasterValue(block, band, point_geometry, metadata, band_name) -> DOUBLE
     ScalarFunction raster_value_geom_band_fn("ST_RasterValue",
         {LogicalType::UBIGINT, LogicalType::BLOB, LogicalType::GEOMETRY(),
-         LogicalType::VARCHAR, LogicalType::INTEGER},
+         LogicalType::VARCHAR, LogicalType::VARCHAR},
         LogicalType::DOUBLE,
-        STRasterValueWithGeometryAndBandFunction);
+        STRasterValueWithGeometryAndBandNameFunction);
     loader.RegisterFunction(raster_value_geom_band_fn);
 
     // ========================================================================

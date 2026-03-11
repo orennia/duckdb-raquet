@@ -29,8 +29,7 @@ This directory contains the files needed to submit the raquet extension to the [
 ## Requirements
 
 - Extension must build with DuckDB's CI toolchain
-- Currently requires DuckDB development branch (main) for `LogicalType::GEOMETRY()` support
-- Will be compatible with DuckDB 1.5+ once GEOMETRY type is in stable release
+- Requires DuckDB 1.5+ for `LogicalType::GEOMETRY()` support
 
 ## Testing Before Submission
 
@@ -43,6 +42,6 @@ make release
 
 ## Status
 
-- [ ] Waiting for DuckDB 1.5 release (GEOMETRY type in core)
+- [x] DuckDB 1.5 released (GEOMETRY type in core)
 - [ ] Submit PR to community-extensions
 - [ ] Extension available via `INSTALL raquet FROM community`

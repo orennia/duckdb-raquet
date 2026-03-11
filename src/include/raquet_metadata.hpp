@@ -48,6 +48,16 @@ struct RaquetMetadata {
         return bands[band_index].second;
     }
 
+    // Get band index by name (0-based), returns -1 if not found
+    int get_band_index(const std::string &band_name) const {
+        for (size_t i = 0; i < bands.size(); i++) {
+            if (bands[i].first == band_name) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
     std::string get_band_type(const std::string &band_name) const {
         for (const auto &band : bands) {
             if (band.first == band_name) {

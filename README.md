@@ -8,25 +8,22 @@ A DuckDB extension for working with [Raquet](https://github.com/CartoDB/raquet) 
 
 - **Apache Parquet** - Columnar storage for efficient compression and query performance
 - **QUADBIN** - A spatial indexing scheme encoding Web Mercator tile coordinates into 64-bit integers
-- **Binary Band Data** - Pixel values stored as compressed BLOBs (gzip or uncompressed)
+- **Binary Band Data** - Pixel values stored as compressed BLOBs (gzip, JPEG, or WebP)
 
 This extension enables DuckDB to query Raquet files directly using SQL, with functions for spatial indexing, pixel extraction, and raster analytics.
 
 ## Features
 
+- **PostGIS-like API** - `ST_RasterValue`, `ST_RasterSummaryStats`, `ST_RegionStats`, `ST_Clip`
 - **QUADBIN Functions** - Convert between tiles, cells, and geographic coordinates
-- **Raster Value Extraction** - PostGIS-style `ST_RasterValue` for pixel lookups
-- **Summary Statistics** - Calculate min/max/mean/stddev for raster tiles
-- **Region Statistics** - Aggregate raster statistics within arbitrary polygon regions
 - **Polygon Fill** - Fill polygons with QUADBIN cells at any resolution
-- **Band Decoding** - Decompress and read binary raster data
-- **Spatial Filtering** - Point-in-tile and bbox intersection tests
-- **PostGIS-like Spatial Predicates** - `ST_Intersects`, `ST_Contains` for raster-vector operations
+- **Band Math** - `ST_NormalizedDifference`, `ST_BandMath` for spectral indices
+- **Spatial Predicates** - `ST_Intersects`, `ST_Contains` for raster-vector operations
 - **Time-Series Support** - CF conventions for temporal rasters (NetCDF compatible)
 - **Cloud-Native** - Query remote Parquet files on S3/GCS with predicate pushdown
-- **Native GEOMETRY Support** - Uses DuckDB 1.5+ native GEOMETRY types (no extensions required)
-- **Interleaved Band Layout** - v0.4.0 support for Band Interleaved by Pixel (BIP) format
-- **Lossy Compression** - v0.4.0 support for JPEG/WebP compressed tiles (15x smaller files)
+- **Native GEOMETRY Support** - Uses DuckDB 1.5+ native GEOMETRY types
+- **Interleaved Band Layout** - Band Interleaved by Pixel (BIP) format
+- **Lossy Compression** - JPEG/WebP compressed tiles (up to 15x smaller files)
 
 ## Installation
 
@@ -37,504 +34,261 @@ INSTALL raquet FROM community;
 LOAD raquet;
 ```
 
-### Self-Hosted (Current - DuckDB Development Build)
-
-The extension is currently available for DuckDB development builds. It requires the `-unsigned` flag since it's not signed by DuckDB.
-
-**From DuckDB CLI:**
-```bash
-duckdb -unsigned -c "
-SET custom_extension_repository = 'http://storage.googleapis.com/duckdb-raquet';
-INSTALL raquet;
-LOAD raquet;
-SELECT quadbin_from_tile(0, 0, 0);
-"
-```
-
-**From SQL:**
-```sql
--- Allow unsigned extensions (required for self-hosted)
-SET allow_unsigned_extensions = true;
-
--- Set custom repository
-SET custom_extension_repository = 'http://storage.googleapis.com/duckdb-raquet';
-
--- Install and load
-INSTALL raquet;
-LOAD raquet;
-```
-
-**Currently supported platforms:**
-- `osx_arm64` (macOS Apple Silicon) - DuckDB dev build `42ba8038ab`
-
-*More platforms coming soon. For other platforms, build from source.*
-
 ### Building from Source
 
-**Prerequisites:**
-- CMake 3.12+
-- C++17 compatible compiler
-- zlib (for gzip decompression)
-- libjpeg (optional, for JPEG lossy compression - v0.4.0)
-- libwebp (optional, for WebP lossy compression - v0.4.0)
+**Prerequisites:** CMake 3.12+, C++17 compiler, zlib, libjpeg (optional), libwebp (optional)
 
 ```bash
-# Clone the repository
 git clone https://github.com/CartoDB/duckdb-raquet.git
 cd duckdb-raquet
-
-# Initialize DuckDB submodule
 git submodule update --init --recursive
-
-# Build release version
 make release
-
-# Run tests
 make test
 ```
-
-**Build Targets:**
-- `make release` - Build optimized release version
-- `make debug` - Build with debug symbols
-- `make test` - Run basic functionality test
-- `make test_sql` - Run SQL test suite
-- `make clean` - Clean build artifacts
-- `make format` - Run clang-format on source files
 
 ## Quick Start
 
 ```sql
--- Load the extension
 LOAD raquet;
 
--- Read a Raquet file (it's just Parquet!)
-SELECT * FROM read_raquet('raster.parquet') LIMIT 10;
+-- Read a Raquet file (metadata is propagated automatically)
+SELECT * FROM read_raquet('raster.parquet') LIMIT 5;
 
--- Get pixel value at a location
-SELECT ST_RasterValue(
-    block,            -- QUADBIN cell ID
-    band_1,           -- Binary band data
-    -73.9857,         -- Longitude
-    40.7484,          -- Latitude
-    'int16',          -- Data type
-    256,              -- Tile size
-    'gzip'            -- Compression
-) AS elevation
+-- Point query: get RGB values at a location
+SELECT
+    ST_RasterValue(block, band_1, ST_Point(-73.98, 40.75), metadata) AS red,
+    ST_RasterValue(block, band_2, ST_Point(-73.98, 40.75), metadata) AS green,
+    ST_RasterValue(block, band_3, ST_Point(-73.98, 40.75), metadata) AS blue
+FROM read_raquet_at('imagery.parquet', -73.98, 40.75);
+
+-- Tile statistics
+SELECT
+    block,
+    (ST_RasterSummaryStats(band_1, metadata)).mean AS avg_value,
+    (ST_RasterSummaryStats(band_1, metadata)).stddev AS std_value
 FROM read_raquet('dem.parquet')
-WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
+LIMIT 5;
 ```
 
 ### Cloud-Native Queries
 
-Query RaQuet files directly from cloud storage with minimal data transfer:
-
 ```sql
--- Load extensions for remote access
-INSTALL httpfs;
 LOAD httpfs;
 LOAD raquet;
 
--- Query Sentinel-2 imagery from Google Cloud Storage
+-- Single point extraction from GCS (downloads only the needed tile, ~2KB)
 SELECT
-    block,
-    quadbin_resolution(block) as zoom,
-    (ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip', 0)).mean as red_mean
-FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
-WHERE quadbin_resolution(block) = 14
-LIMIT 5;
-
--- Single point extraction (downloads only ~2KB, not the full 261MB file)
-SELECT
-    raquet_pixel(band_1, 'uint8',
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
-        256, 'gzip') as red,
-    raquet_pixel(band_2, 'uint8',
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
-        256, 'gzip') as green,
-    raquet_pixel(band_3, 'uint8',
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
-        256, 'gzip') as blue
-FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
-WHERE block = quadbin_from_lonlat(33.5, 16.85, 14);
-```
-
-### Time-Series Queries
-
-Query temporal rasters with CF conventions (NetCDF compatible):
-
-```sql
-LOAD raquet;
-
--- Explore time-series structure
-SELECT
-    COUNT(*) as total_rows,
-    COUNT(DISTINCT block) as tiles,
-    MIN(time_ts) as earliest,
-    MAX(time_ts) as latest
-FROM read_raquet('cfsr_sst.parquet');
--- Result: 1,296 rows, 3 tiles, 1980-01-01 to 2015-12-01
-
--- Filter by year using derived timestamp
-SELECT
-    time_ts,
-    (ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean as sst
-FROM read_raquet('cfsr_sst.parquet')
-WHERE YEAR(time_ts) = 2010
-ORDER BY time_ts
-LIMIT 5;
-
--- Calculate decadal averages
-SELECT
-    (YEAR(time_ts) / 10) * 10 as decade,
-    AVG((ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean) as avg_sst
-FROM read_raquet('cfsr_sst.parquet')
-GROUP BY (YEAR(time_ts) / 10) * 10
-ORDER BY decade;
+    ST_RasterValue(block, band_1, ST_Point(33.5, 16.85), metadata) AS red,
+    ST_RasterValue(block, band_2, ST_Point(33.5, 16.85), metadata) AS green,
+    ST_RasterValue(block, band_3, ST_Point(33.5, 16.85), metadata) AS blue
+FROM read_raquet_at('https://storage.googleapis.com/sdsc_demo25/TCI.parquet', 33.5, 16.85);
 ```
 
 ## Function Reference
 
+### ST_* Functions (Public API)
+
+These are the primary functions for working with raster data.
+
+#### Table Macros
+
+| Function | Description |
+|----------|-------------|
+| `ST_Raster(tbl)` | Read raster data from an iceberg/table |
+| `ST_Raster(tbl, geometry)` | Spatial filter with auto-detected resolution |
+| `ST_Raster(tbl, geometry, resolution)` | Spatial filter with explicit resolution |
+| `ST_RasterAt(tbl, point)` | Point query from table (auto resolution) |
+| `ST_RasterAt(tbl, lon, lat)` | Point query from table with lon/lat |
+| `ST_RasterAt(tbl, lon, lat, resolution)` | Point query with explicit resolution |
+
+#### Pixel Value Extraction
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `ST_RasterValue(block, band, point, metadata)` | Get pixel value at point | `DOUBLE` |
+| `ST_RasterValue(block, band, point, metadata, band_name)` | Get pixel by band name (multi-band) | `DOUBLE` |
+
+#### Tile Statistics
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `ST_RasterSummaryStats(band, metadata)` | Summary statistics (auto nodata from metadata) | `STRUCT(count, sum, mean, min, max, stddev)` |
+| `ST_RasterSummaryStats(band, metadata, nodata)` | Summary statistics with explicit nodata | `STRUCT(count, sum, mean, min, max, stddev)` |
+
+#### Region Statistics (Aggregate)
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `ST_RegionStats(band, block, region, metadata)` | Stats for pixels within geometry | `STRUCT(count, sum, mean, min, max, stddev)` |
+| `ST_RegionStats(band, block, region, metadata, nodata)` | With nodata filtering | `STRUCT(...)` |
+| `ST_RegionStats(band, block, region, metadata, resolution)` | With explicit resolution | `STRUCT(...)` |
+| `ST_RegionStats(band, block, region, metadata, nodata, resolution)` | Full variant | `STRUCT(...)` |
+
+#### Clipping
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `ST_Clip(band, block, geometry, metadata)` | Extract pixels within geometry | `DOUBLE[]` |
+| `ST_Clip(band, block, geometry, metadata, nodata)` | Clip with nodata filtering | `DOUBLE[]` |
+| `ST_ClipMask(band, block, geometry, metadata, nodata)` | Full tile, outside set to nodata | `DOUBLE[]` |
+
+#### Band Math
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `ST_NormalizedDifference(band1, band2, metadata)` | (b1-b2)/(b1+b2) per pixel | `DOUBLE[]` |
+| `ST_NormalizedDifference(band1, band2, metadata, nodata)` | With nodata handling | `DOUBLE[]` |
+| `ST_BandMath(band1, band2, operation, metadata)` | Generic: add, subtract, multiply, divide | `DOUBLE[]` |
+| `ST_NormalizedDifferenceStats(band1, band2, metadata)` | Stats of normalized difference | `STRUCT(...)` |
+
+#### Spatial Predicates
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `ST_Intersects(block, geometry)` | Tile intersects geometry bbox | `BOOLEAN` |
+| `ST_Contains(geometry, block)` | Geometry fully contains tile | `BOOLEAN` |
+
+#### Geometry Helpers
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `ST_Point(lon, lat)` | Create POINT geometry | `GEOMETRY` |
+| `ST_X(geometry)` | Extract longitude from point | `DOUBLE` |
+| `ST_Y(geometry)` | Extract latitude from point | `DOUBLE` |
+| `ST_GeomFromQuadbin(cell)` | Convert cell to GEOMETRY polygon | `GEOMETRY` |
+| `ST_Band(metadata, band_name)` | Get band index by name | `INTEGER` |
+
 ### QUADBIN Functions
 
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `quadbin_from_tile(x, y, z)` | Convert tile coordinates to QUADBIN cell | `UBIGINT` |
-| `quadbin_to_tile(cell)` | Convert QUADBIN cell to tile coordinates | `STRUCT(x, y, z)` |
-| `quadbin_from_lonlat(lon, lat, resolution)` | Convert lon/lat to QUADBIN cell | `UBIGINT` |
-| `quadbin_to_lonlat(cell)` | Get center lon/lat of QUADBIN cell | `STRUCT(lon, lat)` |
-| `quadbin_resolution(cell)` | Get resolution level (zoom) from cell | `INTEGER` |
-| `quadbin_to_bbox(cell)` | Get bounding box of cell | `STRUCT(min_lon, min_lat, max_lon, max_lat)` |
-| `quadbin_pixel_xy(lon, lat, res, tile_size)` | Get pixel coordinates within tile | `STRUCT(pixel_x, pixel_y)` |
-| `quadbin_cell_for_point(lon, lat, res)` | Alias for quadbin_from_lonlat | `UBIGINT` |
+| Function | Description | Return |
+|----------|-------------|--------|
+| `quadbin_from_tile(x, y, z)` | Tile coordinates to QUADBIN | `UBIGINT` |
+| `quadbin_to_tile(cell)` | QUADBIN to tile coordinates | `STRUCT(x, y, z)` |
+| `quadbin_from_lonlat(lon, lat, resolution)` | Lon/lat to QUADBIN cell | `UBIGINT` |
+| `quadbin_to_lonlat(cell)` | Cell center as lon/lat | `STRUCT(lon, lat)` |
+| `quadbin_resolution(cell)` | Get resolution level | `INTEGER` |
+| `quadbin_to_bbox(cell)` | Bounding box of cell | `STRUCT(...)` |
+| `quadbin_pixel_xy(lon, lat, res, tile_size)` | Pixel coordinates within tile | `STRUCT(pixel_x, pixel_y)` |
+| `quadbin_to_parent(cell)` | Parent cell (resolution - 1) | `UBIGINT` |
+| `quadbin_to_parent(cell, resolution)` | Parent at specific resolution | `UBIGINT` |
+| `quadbin_to_children(cell)` | 4 children at resolution + 1 | `LIST(UBIGINT)` |
+| `quadbin_to_children(cell, resolution)` | Children at specific resolution | `LIST(UBIGINT)` |
+| `quadbin_sibling(cell)` | Sibling cells (same parent) | `LIST(UBIGINT)` |
+| `quadbin_kring(cell, k)` | Cells within k distance | `LIST(UBIGINT)` |
+| `QUADBIN_POLYFILL(geometry, resolution)` | Fill geometry with cells | `LIST(UBIGINT)` |
+| `QUADBIN_POLYFILL(geometry, resolution, mode)` | Fill with mode: center/intersects/contains | `LIST(UBIGINT)` |
+| `quadbin_to_wkt(cell)` | Cell as WKT POLYGON | `VARCHAR` |
+| `quadbin_to_geojson(cell)` | Cell as GeoJSON | `VARCHAR` |
 
-### Spatial Filtering Functions
+### read_raquet* Functions (File I/O)
 
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `quadbin_contains(cell, lon, lat)` | Check if point is within tile | `BOOLEAN` |
-| `quadbin_intersects_bbox(cell, min_lon, min_lat, max_lon, max_lat)` | Check if tile intersects bbox | `BOOLEAN` |
-| `ST_Intersects(block, geometry)` | Check if tile intersects geometry bbox | `BOOLEAN` |
-| `ST_Contains(geometry, block)` | Check if geometry fully contains tile | `BOOLEAN` |
+| Function | Description |
+|----------|-------------|
+| `read_raquet(file)` | Read all data rows (metadata propagated) |
+| `read_raquet(file, geometry)` | Spatial filter with auto resolution |
+| `read_raquet(file, geometry, resolution)` | Spatial filter with explicit resolution |
+| `read_raquet_at(file, point)` | Point query (auto resolution) |
+| `read_raquet_at(file, lon, lat)` | Point query with lon/lat |
+| `read_raquet_at(file, lon, lat, resolution)` | Point query with explicit resolution |
+| `read_raquet_metadata(file)` | Read metadata row only |
 
-### Hierarchical Functions
+### Advanced / Internal Functions
 
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `quadbin_to_parent(cell)` | Get parent cell at resolution - 1 | `UBIGINT` |
-| `quadbin_to_parent(cell, resolution)` | Get parent cell at specified resolution | `UBIGINT` |
-| `quadbin_to_children(cell)` | Get 4 children cells at resolution + 1 | `LIST(UBIGINT)` |
-| `quadbin_to_children(cell, resolution)` | Get all children at specified resolution | `LIST(UBIGINT)` |
-| `quadbin_sibling(cell)` | Get sibling cells (same parent) | `LIST(UBIGINT)` |
-| `quadbin_kring(cell, k)` | Get cells within k distance | `LIST(UBIGINT)` |
-| `quadbin_polyfill(geometry, resolution)` | Fill polygon with cells (center mode) | `LIST(UBIGINT)` |
-| `quadbin_polyfill(geometry, resolution, mode)` | Fill polygon with cells (mode: 'center', 'intersects', 'contains') | `LIST(UBIGINT)` |
+These are lower-level functions for specialized workflows.
 
-### Spatial Format Functions
-
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `quadbin_to_wkt(cell)` | Convert cell to WKT POLYGON | `VARCHAR` |
-| `quadbin_to_geojson(cell)` | Convert cell to GeoJSON | `VARCHAR` |
-| `quadbin_boundary(cell)` | Alias for quadbin_to_wkt | `VARCHAR` |
-| `ST_GeomFromQuadbin(cell)` | Convert cell to GEOMETRY polygon | `GEOMETRY` |
-
-### Raster Functions
-
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `raquet_pixel(band, dtype, x, y, width, compression)` | Get pixel value at x,y | `DOUBLE` |
-| `raquet_pixel(band, metadata, x, y)` | Get pixel using metadata | `DOUBLE` |
-| `ST_RasterValue(block, band, lon, lat, dtype, width, compression)` | Get pixel at lon/lat | `DOUBLE` |
-| `ST_RasterValue(block, band, lon, lat, metadata)` | Get pixel using metadata | `DOUBLE` |
-| `ST_RasterValue(block, band, lon, lat, metadata, band_idx)` | Get specific band pixel | `DOUBLE` |
-| `ST_RasterValue(block, band, point_geom, metadata)` | Get pixel using GEOMETRY | `DOUBLE` |
-| `raquet_decode_band(band, dtype, width, height, compression)` | Decode entire band | `DOUBLE[]` |
-| `ST_RasterSummaryStats(band, dtype, w, h, compression)` | Get tile statistics | `STRUCT(...)` |
-| `ST_RasterSummaryStats(band, dtype, w, h, compression, nodata)` | Stats with nodata filter | `STRUCT(...)` |
-| `ST_RegionStats(band, block, region, metadata)` | Aggregate stats for pixels within geometry | `STRUCT(...)` |
-| `ST_RegionStats(band, block, region, metadata, nodata)` | Region stats with nodata filter | `STRUCT(...)` |
-| `ST_Clip(band, block, geometry, metadata)` | Extract pixel values within geometry | `DOUBLE[]` |
-| `ST_Clip(band, block, geometry, metadata, nodata)` | Clip with nodata filtering | `DOUBLE[]` |
-| `ST_ClipMask(band, block, geometry, metadata, nodata)` | Full tile with outside pixels set to nodata | `DOUBLE[]` |
-
-### Interleaved Layout Functions (v0.4.0)
-
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `raquet_pixel_interleaved(pixels, metadata, band_idx, x, y)` | Get pixel from interleaved (BIP) data | `DOUBLE` |
-| `ST_RasterValueInterleaved(block, pixels, point_geom, metadata, band_idx)` | Get pixel using GEOMETRY from interleaved data | `DOUBLE` |
-
-### Band Math Functions
-
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `ST_NormalizedDifference(band1, band2, metadata)` | Compute (band1-band2)/(band1+band2) per pixel | `DOUBLE[]` |
-| `ST_NormalizedDifference(band1, band2, metadata, nodata)` | Normalized difference with nodata handling | `DOUBLE[]` |
-| `ST_NDVI(nir_band, red_band, metadata)` | Vegetation index (alias for normalized difference) | `DOUBLE[]` |
-| `ST_BandMath(band1, band2, operation, metadata)` | Generic band math: add, subtract, multiply, divide, ndiff | `DOUBLE[]` |
-| `ST_NormalizedDifferenceStats(band1, band2, metadata)` | Statistics of normalized difference | `STRUCT(...)` |
-
-### Metadata Functions
-
-| Function | Description | Return Type |
-|----------|-------------|-------------|
-| `raquet_is_metadata_row(block)` | Check if block = 0 (metadata) | `BOOLEAN` |
-| `raquet_is_data_row(block)` | Check if block != 0 (data) | `BOOLEAN` |
-| `raquet_parse_metadata(json)` | Parse metadata JSON (returns v0.4.0 struct) | `STRUCT(...)` |
-| `raquet_band_type(metadata, band_idx)` | Get band data type | `VARCHAR` |
-| `raquet_compression(metadata)` | Get compression type | `VARCHAR` |
-| `raquet_block_size(metadata)` | Get tile size | `INTEGER` |
-
-**`raquet_parse_metadata` returns:**
-```
-STRUCT(
-    compression VARCHAR,           -- 'gzip', 'none', 'jpeg', 'webp'
-    compression_quality INTEGER,   -- JPEG/WebP quality (1-100), 0 if N/A
-    band_layout VARCHAR,           -- 'sequential' or 'interleaved'
-    block_width INTEGER,
-    block_height INTEGER,
-    min_zoom INTEGER,
-    max_zoom INTEGER,
-    num_bands INTEGER
-)
-```
-
-## Supported Data Types
-
-| Type | Description |
-|------|-------------|
-| `uint8` | Unsigned 8-bit integer (0-255) |
-| `int8` | Signed 8-bit integer |
-| `uint16` | Unsigned 16-bit integer |
-| `int16` | Signed 16-bit integer |
-| `uint32` | Unsigned 32-bit integer |
-| `int32` | Signed 32-bit integer |
-| `uint64` | Unsigned 64-bit integer |
-| `int64` | Signed 64-bit integer |
-| `float32` | 32-bit floating point |
-| `float64` | 64-bit floating point |
+| Function | Description | Return |
+|----------|-------------|--------|
+| `raquet_pixel(band, dtype, x, y, width, compression)` | Pixel by x,y with explicit params | `DOUBLE` |
+| `raquet_pixel(band, metadata, x, y)` | Pixel by x,y with metadata | `DOUBLE` |
+| `raquet_pixel(band, metadata, band_index, x, y)` | Multi-band pixel by index | `DOUBLE` |
+| `raquet_decode_band(band, dtype, w, h, compression)` | Decode entire band | `DOUBLE[]` |
+| `raquet_pixel_interleaved(pixels, metadata, band_idx, x, y)` | Interleaved layout pixel | `DOUBLE` |
+| `raquet_parse_metadata(json)` | Parse metadata JSON | `STRUCT(...)` |
+| `ST_RasterSummaryStats(band, dtype, w, h, compression)` | Stats with explicit params | `STRUCT(...)` |
+| `ST_RasterSummaryStats(band, dtype, w, h, compression, nodata)` | Stats with explicit params + nodata | `STRUCT(...)` |
 
 ## Usage Examples
 
-### Reading Raquet Files
-
-Use `read_raquet()` for data rows (metadata handled automatically) and `read_raquet_metadata()` when you only need the metadata row.
-
-```sql
--- Raquet files are standard Parquet, read directly
-SELECT * FROM read_raquet('elevation.parquet') LIMIT 10;
-
--- Read only data rows (metadata is handled automatically)
-SELECT * FROM read_raquet('elevation.parquet');
-
--- Get metadata row
-SELECT metadata FROM read_raquet_metadata('elevation.parquet');
-```
-
-### QUADBIN Spatial Indexing
-
-```sql
--- Convert tile coordinates (x=4096, y=2048, zoom=13) to QUADBIN
-SELECT quadbin_from_tile(4096, 2048, 13);
--- Result: 5234261499580514304
-
--- Convert back to tile coordinates
-SELECT (quadbin_to_tile(5234261499580514304)).*;
--- Result: {x: 4096, y: 2048, z: 13}
-
--- Get QUADBIN cell for New York City at zoom 13
-SELECT quadbin_from_lonlat(-73.9857, 40.7484, 13);
-
--- Get center coordinates of a cell
-SELECT (quadbin_to_lonlat(5234261499580514304)).*;
-
--- Get bounding box of a cell
-SELECT (quadbin_to_bbox(5234261499580514304)).*;
-
--- Get resolution/zoom level
-SELECT quadbin_resolution(5234261499580514304);
--- Result: 13
-```
-
-### Extracting Raster Values
-
-```sql
--- Get pixel value at specific coordinates
-SELECT raquet_pixel(
-    band_1,           -- Band data (BLOB)
-    'int16',          -- Data type
-    128,              -- Pixel X
-    128,              -- Pixel Y
-    256,              -- Tile width
-    'gzip'            -- Compression
-) FROM dem WHERE block = 5234261499580514304;
-
--- Get elevation at a geographic location
-SELECT ST_RasterValue(
-    block,
-    band_1,
-    -73.9857,         -- Longitude
-    40.7484,          -- Latitude
-    'int16',
-    256,
-    'gzip'
-) AS elevation
-FROM dem
-WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
-```
-
-### Point-Raster Joins
-
-```sql
--- Get elevation for a table of points
-SELECT
-    p.id,
-    p.name,
-    ST_RasterValue(
-        r.block, r.band_1,
-        ST_X(p.geom), ST_Y(p.geom),
-        'int16', 256, 'gzip'
-    ) AS elevation
-FROM points p
-JOIN dem r ON quadbin_from_lonlat(ST_X(p.geom), ST_Y(p.geom), 13) = r.block
-;
-```
-
-### Summary Statistics
-
-```sql
--- Get statistics for each tile
-SELECT
-    block,
-    (ST_RasterSummaryStats(band_1, 'int16', 256, 256, 'gzip')).*
-FROM dem
-LIMIT 5;
--- Returns: count, sum, mean, min, max, stddev
-
--- Filter out nodata values
-SELECT
-    block,
-    (ST_RasterSummaryStats(band_1, 'int16', 256, 256, 'gzip', -9999)).*
-FROM dem
-;
-```
-
-### Spatial Filtering
-
-```sql
--- Find tiles that contain a specific point
-SELECT block
-FROM dem
-WHERE quadbin_contains(block, -73.9857, 40.7484);
-
--- Find tiles intersecting a bounding box
-SELECT block
-FROM dem
-WHERE quadbin_intersects_bbox(block, -74.1, 40.6, -73.8, 40.9);
-```
-
-### Native GEOMETRY Support (DuckDB 1.5+)
+### Point Queries (Single Location)
 
 ```sql
 LOAD raquet;
 
--- Convert QUADBIN cell to geometry for spatial operations
+-- Simplest form: get all bands at a point
 SELECT
-    block,
-    quadbin_to_wkt(block)::GEOMETRY AS geom
-FROM dem
-LIMIT 5;
+    ST_RasterValue(block, band_1, ST_Point(33.5, 16.85), metadata) AS red,
+    ST_RasterValue(block, band_2, ST_Point(33.5, 16.85), metadata) AS green,
+    ST_RasterValue(block, band_3, ST_Point(33.5, 16.85), metadata) AS blue
+FROM read_raquet_at('imagery.parquet', 33.5, 16.85);
 
--- Or use the native GEOMETRY conversion function
-SELECT
-    block,
-    ST_GeomFromQuadbin(block) AS geom
-FROM dem
-LIMIT 5;
-
--- Get elevation using GEOMETRY point
-SELECT ST_RasterValue(
-    r.block,
-    r.band_1,
-    'POINT(-73.9857 40.7484)'::GEOMETRY,
-    metadata
-) AS elevation
-FROM dem r
-WHERE block = quadbin_from_lonlat(-73.9857, 40.7484, 13);
+-- Using lon/lat directly in read_raquet_at
+SELECT *
+FROM read_raquet_at('dem.parquet', -73.98, 40.75);
 ```
 
-> **Note on CRS and GEOGRAPHY**: Currently, raquet assumes input geometries are in **EPSG:4326** (WGS84 lon/lat) and raster data is in **EPSG:3857** (Web Mercator). Coordinate transformation is handled internally. Future versions of DuckDB (v1.5+) are expected to add [CRS type-level tracking](https://github.com/duckdb/duckdb-spatial/issues/441) and a native [GEOGRAPHY type](https://github.com/duckdb/duckdb-spatial/issues/376) for spherical operations. When available, raquet will be updated to leverage these capabilities for automatic CRS handling.
-
-### Polygon Fill (Polyfill)
+### Spatial Filtering (Regions)
 
 ```sql
 LOAD raquet;
 
--- Fill a polygon with QUADBIN cells at resolution 10
-SELECT unnest(quadbin_polyfill(
-    'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY,
-    10
-)) AS cell;
+-- Read tiles within a polygon
+SELECT count(*) AS tile_count
+FROM read_raquet(
+    'dem.parquet',
+    'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY
+);
 
--- Fill with different modes:
--- 'center' (default): cells whose center is inside the polygon
--- 'intersects': cells that intersect the polygon (complete coverage)
--- 'contains': cells fully contained within the polygon (conservative)
-SELECT unnest(quadbin_polyfill(
-    'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY,
-    10,
-    'intersects'
-)) AS cell;
-```
-
-### Region Statistics
-
-```sql
-LOAD raquet;
-
--- Get aggregate statistics for pixels within a polygon region
--- Using read_raquet which automatically propagates metadata
+-- Region statistics across tiles within a polygon
 SELECT (ST_RegionStats(
-    band_1,
-    block,
+    band_1, block,
     'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY,
     metadata
 )).*
-FROM read_raquet('dem.parquet')
-WHERE ST_RasterIntersects(block, 'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY);
--- Returns: count, sum, mean, min, max, stddev
-
--- With nodata filtering
-SELECT (ST_RegionStats(
-    band_1,
-    block,
-    region_geom,
-    metadata,
-    -9999.0  -- nodata value to exclude
-)).*
-FROM read_raquet('raster_data.parquet');
+FROM read_raquet('dem.parquet');
 ```
 
-### PostGIS-like Spatial Predicates
+### Tile Statistics
 
 ```sql
 LOAD raquet;
 
--- Find tiles that intersect a polygon (fast bbox check)
-SELECT block
+-- Statistics per tile (auto nodata from metadata)
+SELECT
+    block,
+    (ST_RasterSummaryStats(band_1, metadata)).mean AS avg_elevation,
+    (ST_RasterSummaryStats(band_1, metadata)).stddev AS elevation_std
 FROM read_raquet('dem.parquet')
-WHERE ST_RasterIntersects(block, 'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY);
+LIMIT 10;
 
--- Find tiles that contain a specific point
-SELECT block
-FROM read_raquet('dem.parquet')
-WHERE quadbin_contains(block, 'POINT(-73.9857 40.7484)'::GEOMETRY);
+-- Override nodata value
+SELECT
+    block,
+    (ST_RasterSummaryStats(band_1, metadata, -9999.0)).mean AS avg_temp
+FROM read_raquet('temperature.parquet')
+LIMIT 10;
 ```
 
-### Clipping Rasters
+### Band Math (Vegetation Indices)
+
+```sql
+LOAD raquet;
+
+-- NDVI: (NIR - Red) / (NIR + Red)
+SELECT
+    block,
+    ST_NormalizedDifference(band_4, band_3, metadata) AS ndvi_values
+FROM read_raquet('satellite.parquet')
+LIMIT 1;
+
+-- Get NDVI statistics directly
+SELECT
+    block,
+    (ST_NormalizedDifferenceStats(band_4, band_3, metadata)).*
+FROM read_raquet('satellite.parquet')
+LIMIT 5;
+```
+
+### Clipping
 
 ```sql
 LOAD raquet;
@@ -546,199 +300,106 @@ SELECT
         'POLYGON((-74.0 40.7, -73.9 40.7, -73.9 40.8, -74.0 40.8, -74.0 40.7))'::GEOMETRY,
         metadata
     ) AS clipped_values
-FROM read_raquet('dem.parquet')
-WHERE ST_RasterIntersects(block, 'POLYGON((-74.0 40.7, -73.9 40.7, -73.9 40.8, -74.0 40.8, -74.0 40.7))'::GEOMETRY);
+FROM read_raquet('dem.parquet');
 
--- Get full tile with outside pixels masked to nodata
+-- Full tile with outside pixels masked to nodata
 SELECT ST_ClipMask(band_1, block, clip_geom, metadata, -9999.0) AS masked_tile
-FROM read_raquet('raster_data.parquet');
+FROM read_raquet('raster.parquet');
 ```
 
-### Interleaved Layout and Lossy Compression (v0.4.0)
-
-RaQuet v0.4.0 introduces interleaved band layout and lossy compression for significantly smaller file sizes.
-
-```sql
-LOAD raquet;
-LOAD httpfs;
-
--- Check if a file uses interleaved layout
-WITH meta AS (
-    SELECT metadata
-    FROM read_raquet_metadata('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet')
-)
-SELECT
-    (raquet_parse_metadata(metadata)).compression,      -- 'jpeg'
-    (raquet_parse_metadata(metadata)).compression_quality,  -- 85
-    (raquet_parse_metadata(metadata)).band_layout       -- 'interleaved'
-FROM meta;
-
--- Extract RGB values from interleaved JPEG file
-WITH meta AS (
-    SELECT metadata FROM read_raquet_metadata('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet')
-),
-data AS (
-    SELECT block, pixels FROM read_raquet('gs://raquet_demo_data/experimental/tci_interleaved_jpeg.parquet') LIMIT 1
-)
-SELECT
-    raquet_pixel_interleaved(data.pixels, meta.metadata, 0, 128, 128) as red,
-    raquet_pixel_interleaved(data.pixels, meta.metadata, 1, 128, 128) as green,
-    raquet_pixel_interleaved(data.pixels, meta.metadata, 2, 128, 128) as blue
-FROM data, meta;
-
--- Use ST_RasterValueInterleaved with GEOMETRY
-SELECT ST_RasterValueInterleaved(
-    d.block,
-    d.pixels,
-    'POINT(33.5 16.85)'::GEOMETRY,
-    m.metadata,
-    0  -- band index: 0=red, 1=green, 2=blue
-) as red_value
-FROM read_raquet('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet') d,
-     (SELECT metadata FROM read_raquet_metadata('gs://raquet_demo_data/experimental/tci_interleaved_webp.parquet')) m
-WHERE d.block = quadbin_from_lonlat(33.5, 16.85, 10);
-```
-
-**File Size Comparison (same Sentinel-2 TCI data):**
-
-| Format | Layout | Compression | File Size | Relative |
-|--------|--------|-------------|-----------|----------|
-| Baseline | Sequential | gzip | 256 MB | 1.0x |
-| v0.4.0 | Interleaved | gzip | 286 MB | 1.1x |
-| v0.4.0 | Interleaved | JPEG (q85) | 27 MB | **0.1x** |
-| v0.4.0 | Interleaved | WebP (q90) | 17 MB | **0.07x** |
-
-### Band Math and Vegetation Indices
+### Iceberg / Table Queries
 
 ```sql
 LOAD raquet;
 
--- Calculate NDVI (Normalized Difference Vegetation Index)
--- NDVI = (NIR - Red) / (NIR + Red)
-WITH meta AS (
-    SELECT metadata FROM read_raquet_metadata('satellite.parquet')
-)
+-- Read from an iceberg table
+SELECT * FROM ST_Raster('catalog.schema.raster_table') LIMIT 5;
+
+-- Point query on a table
 SELECT
-    block,
-    ST_NDVI(band_4, band_3, (SELECT metadata FROM meta)) AS ndvi_values
-FROM read_raquet('satellite.parquet');
+    ST_RasterValue(block, band_1, ST_Point(-3.7, 40.4), metadata) AS value
+FROM ST_RasterAt('catalog.schema.raster_table', -3.7, 40.4);
 
--- Get NDVI statistics directly (more efficient than computing array first)
-SELECT
-    block,
-    (ST_NormalizedDifferenceStats(band_4, band_3, metadata)).*
-FROM satellite_data
-;
--- Returns: count, sum, mean, min, max, stddev
-
--- Generic band math operations
-SELECT ST_BandMath(band_1, band_2, 'subtract', metadata) AS difference
-FROM raster_data;
-
--- Supported operations: 'add', 'subtract', 'multiply', 'divide', 'ndiff'
+-- Spatial filter on a table
+SELECT count(*) AS tiles
+FROM ST_Raster(
+    'catalog.schema.raster_table',
+    'POLYGON((-4 40, -3 40, -3 41, -4 41, -4 40))'::GEOMETRY
+);
 ```
 
-### Time-Series Raster Queries
-
-Raquet supports time-series rasters using the CF (Climate and Forecast) conventions, primarily for NetCDF data with temporal dimensions.
+### Time-Series Rasters
 
 ```sql
 LOAD raquet;
 
--- Query time-series data structure (CFSR Sea Surface Temperature example)
+-- Explore time-series structure
 SELECT
     COUNT(*) as total_rows,
-    COUNT(DISTINCT block) as unique_tiles,
+    COUNT(DISTINCT block) as tiles,
     MIN(time_ts) as earliest,
     MAX(time_ts) as latest
 FROM read_raquet('cfsr_sst.parquet');
--- Result: 1296 rows, 3 tiles, 1980-01-01 to 2015-12-01
 
--- Filter by year using the derived timestamp (easy SQL)
+-- Filter by year
 SELECT
-    block,
     time_ts,
-    (ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean as sst_mean
+    (ST_RasterSummaryStats(band_1, metadata, -999000000.0)).mean AS sst
 FROM read_raquet('cfsr_sst.parquet')
 WHERE YEAR(time_ts) = 2010
 ORDER BY time_ts
 LIMIT 5;
 
--- Filter by date range
-SELECT *
-FROM read_raquet('cfsr_sst.parquet')
-WHERE time_ts >= '2000-01-01' AND time_ts < '2010-01-01';
-
--- Calculate annual averages for climate analysis
+-- Decadal averages
 SELECT
-    YEAR(time_ts) as year,
-    AVG((ST_RasterSummaryStats(band_1, 'float64', 256, 256, 'gzip', -999000000.0)).mean) as annual_sst
+    (YEAR(time_ts) / 10) * 10 AS decade,
+    AVG((ST_RasterSummaryStats(band_1, metadata, -999000000.0)).mean) AS avg_sst
 FROM read_raquet('cfsr_sst.parquet')
-WHERE block = 5192650370358181887  -- specific tile
-GROUP BY YEAR(time_ts)
-ORDER BY year;
-
--- Use CF time value directly (for NetCDF compatibility)
--- CF units: "minutes since 1980-01-01 00:00"
-SELECT time_cf, time_ts
-FROM read_raquet('cfsr_sst.parquet')
-WHERE time_cf < 100000;  -- First ~2 months
+GROUP BY (YEAR(time_ts) / 10) * 10
+ORDER BY decade;
 ```
 
-**Why dual time columns?**
+### QUADBIN Spatial Indexing
 
-| Column | Purpose | Use Case |
-|--------|---------|----------|
-| `time_cf` | Authoritative CF value | NetCDF round-trip fidelity, scientific reproducibility |
-| `time_ts` | Derived timestamp | Easy SQL filtering, Parquet predicate pushdown |
+```sql
+LOAD raquet;
 
-The `time_ts` column enables efficient queries like `WHERE YEAR(time_ts) = 2010` without needing to understand the CF epoch and units. For non-Gregorian calendars (360_day, noleap), `time_ts` will be NULL and you must use `time_cf`.
+-- Tile coordinates to QUADBIN
+SELECT quadbin_from_tile(4096, 2048, 13);
+
+-- Lon/lat to QUADBIN cell
+SELECT quadbin_from_lonlat(-73.98, 40.75, 13);
+
+-- Get cell properties
+SELECT
+    quadbin_resolution(5234261499580514304) AS zoom,
+    (quadbin_to_lonlat(5234261499580514304)).* AS center,
+    (quadbin_to_bbox(5234261499580514304)).* AS bbox;
+
+-- Fill polygon with cells
+SELECT unnest(QUADBIN_POLYFILL(
+    'POLYGON((-74.1 40.6, -73.8 40.6, -73.8 40.9, -74.1 40.9, -74.1 40.6))'::GEOMETRY,
+    10
+)) AS cell;
+```
 
 ## Raquet File Format
 
 A Raquet file is a Parquet file with specific conventions:
 
-### Standard Raster Schema (Sequential Layout)
+### Schema
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `block` | `UBIGINT` | QUADBIN cell ID (0 for metadata row) |
-| `band_1`, `band_2`, ... | `BLOB` | Compressed pixel data (one column per band) |
-| `metadata` | `VARCHAR` | JSON metadata (only in row where block=0) |
+| `band_1`, `band_2`, ... | `BLOB` | Pixel data per band (sequential layout) |
+| `pixels` | `BLOB` | All bands interleaved (interleaved layout) |
+| `metadata` | `VARCHAR` | JSON metadata (only where block=0) |
+| `time_cf` | `DOUBLE` | CF numeric time value (time-series only) |
+| `time_ts` | `TIMESTAMP` | Derived timestamp (time-series only) |
 
-### Interleaved Raster Schema (v0.4.0)
+### Metadata JSON
 
-| Column | Type | Description |
-|--------|------|-------------|
-| `block` | `UBIGINT` | QUADBIN cell ID (0 for metadata row) |
-| `pixels` | `BLOB` | All bands interleaved as [R₀,G₀,B₀,R₁,G₁,B₁,...] |
-| `metadata` | `VARCHAR` | JSON metadata (only in row where block=0) |
-
-**Interleaved layout advantages:**
-- Better compression for correlated bands (RGB imagery)
-- Required for JPEG/WebP lossy compression
-- Single column simplifies schema
-
-### Time-Series Raster Schema
-
-For rasters with temporal dimensions (e.g., NetCDF files), two additional columns are added:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `block` | `UBIGINT` | QUADBIN cell ID (0 for metadata row) |
-| `metadata` | `VARCHAR` | JSON metadata |
-| `time_cf` | `DOUBLE` | **Authoritative** CF numeric time value (e.g., minutes since reference) |
-| `time_ts` | `TIMESTAMP` | **Derived** timestamp for convenience queries (nullable for non-Gregorian calendars) |
-| `band_1` | `BLOB` | Compressed pixel data |
-
-**Key points:**
-- `time_cf` is authoritative - preserves exact CF convention values for NetCDF round-trip fidelity
-- `time_ts` is derived - enables easy SQL queries with Parquet predicate pushdown
-- `time_ts` may be NULL for non-Gregorian calendars (360_day, noleap, etc.)
-- Each row represents one tile at one time step
-- Rows are sorted by `(block, time_cf)` for efficient filtering
-
-**Metadata JSON Structure:**
 ```json
 {
   "file_format": "raquet",
@@ -761,78 +422,17 @@ For rasters with temporal dimensions (e.g., NetCDF files), two additional column
 }
 ```
 
-**Time-Series Metadata (additional fields):**
-```json
-{
-  "time": {
-    "cf:units": "minutes since 1980-01-01 00:00",
-    "cf:calendar": "standard",
-    "interpretation": "period_start",
-    "count": 432,
-    "range": [0.0, 18889920.0]
-  }
-}
-```
+### Supported Data Types
 
-The `interpretation` field indicates how timestamps should be understood:
-- `period_start` - timestamp marks the beginning of the period (e.g., Jan 1 for yearly data)
-- `instant` - timestamp marks the exact acquisition time
+`uint8`, `int8`, `uint16`, `int16`, `uint32`, `int32`, `uint64`, `int64`, `float32`, `float64`
 
-## Coordinate System and Projections
+## Coordinate System
 
-**Important:** This extension works exclusively with **Web Mercator (EPSG:3857)** tiled rasters.
-
-### How It Works
-
-- **QUADBIN** encodes XYZ tile coordinates from the Web Mercator tile pyramid
-- User queries use **WGS84 lon/lat (EPSG:4326)** which are converted internally
-- All tiles are axis-aligned (no rotation or skew supported)
-
-### Comparison with PostGIS Raster
-
-| Feature | PostGIS Raster | DuckDB Raquet |
-|---------|---------------|---------------|
-| Projections | Any SRID (UTM, Albers, etc.) | Web Mercator only |
-| Geotransform | Full 6-parameter affine | Implicit from QUADBIN |
-| Rotation/Skew | Supported | Not supported |
-| Reprojection | On-the-fly | Pre-tile to Web Mercator |
-| Spatial Index | R-tree (explicit) | QUADBIN (implicit) |
-
-### Why Web Mercator Only?
-
-This is a deliberate design choice for cloud-native raster workflows:
-
-1. **Simplicity** - No coordinate transformation overhead at query time
-2. **Performance** - QUADBIN provides free hierarchical spatial indexing
-3. **Compatibility** - Matches standard web mapping tile pyramids (XYZ, TMS)
-4. **Cloud-Native** - Aligns with COG and other tiled formats
-
-### Data Preparation
-
-If your raster data is in a different projection, convert it to Web Mercator tiles before loading:
-
-```bash
-# Using GDAL to create Web Mercator tiles
-gdalwarp -t_srs EPSG:3857 input.tif output_webmercator.tif
-gdal2tiles.py output_webmercator.tif tiles/
-```
-
-Or use tools like [rio-tiler](https://github.com/cogeotiff/rio-tiler) or [titiler](https://github.com/developmentseed/titiler) for dynamic tiling.
-
-## Dependencies
-
-- **DuckDB** - Core database engine (included as submodule)
-- **zlib** - For gzip decompression (system dependency)
-- **libjpeg** - For JPEG decompression (optional, enables JPEG lossy compression)
-- **libwebp** - For WebP decompression (optional, enables WebP lossy compression)
-
-## License
-
-Apache 2.0
+This extension works with **Web Mercator (EPSG:3857)** tiled rasters. User queries use **WGS84 lon/lat (EPSG:4326)** which are converted internally.
 
 ## Performance
 
-DuckDB Raquet provides **10-100x performance improvements** for analytical raster workloads compared to PostGIS Raster:
+DuckDB Raquet provides **10-100x improvements** for analytical raster workloads versus PostGIS Raster:
 
 | Operation | DuckDB Raquet | PostGIS Raster | Speedup |
 |-----------|---------------|----------------|---------|
@@ -841,103 +441,30 @@ DuckDB Raquet provides **10-100x performance improvements** for analytical raste
 | Band math (NDVI) | 0.69s | 72.6s | **105x** |
 | Spatial filter + stats | 0.06s | 0.41s | **6.8x** |
 
-See [docs/PERFORMANCE_COMPARISON.md](docs/PERFORMANCE_COMPARISON.md) for full benchmarks including cloud-native (GCS) performance.
-
-## Related Projects
-
-- [Raquet Specification](https://github.com/CartoDB/raquet) - The Raquet format specification
-- [DuckDB](https://duckdb.org) - Fast in-process analytical database
-- [DuckDB Spatial](https://github.com/duckdb/duckdb-spatial) - Spatial extension for DuckDB
-- [CARTO Analytics Toolbox](https://docs.carto.com/data-and-analysis/analytics-toolbox-for-bigquery/sql-reference/raster) - Raster functions for cloud data warehouses
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Ensure all tests pass (`make test_sql`)
-5. Submit a pull request
+See [docs/PERFORMANCE_COMPARISON.md](docs/PERFORMANCE_COMPARISON.md) for full benchmarks.
 
 ## Sample Data
 
-CARTO provides sample Raquet files for testing:
+| File | Description | Size |
+|------|-------------|------|
+| [TCI.parquet](https://storage.googleapis.com/sdsc_demo25/TCI.parquet) | Sentinel-2 True Color (3 bands, uint8) | 261 MB |
+| [riyadh.parquet](https://storage.googleapis.com/bq_ee_exports/raquet-test/riyadh.parquet) | Satellite imagery (3 bands, uint16) | 809 MB |
+| [naip_test.parquet](https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet) | NAIP aerial imagery (3 bands, uint8) | 380 MB |
 
-| File | Description | Size | URL |
-|------|-------------|------|-----|
-| `riyadh.parquet` | Satellite imagery of Riyadh (3 bands, uint16) | 809 MB | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/riyadh.parquet) |
-| `naip_test.parquet` | NAIP aerial imagery, NY area (3 bands, uint8) | 380 MB | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet) |
-| `europe.parquet` | European coverage | - | [Download](https://storage.googleapis.com/bq_ee_exports/raquet-test/europe.parquet) |
-| `TCI.parquet` | Sentinel-2 True Color (3 bands, uint8) | 261 MB | [Download](https://storage.googleapis.com/sdsc_demo25/TCI.parquet) |
+## Dependencies
 
-**v0.4.0 Experimental Files (Interleaved Layout + Lossy Compression):**
+- **DuckDB 1.5+** - Core database engine
+- **zlib** - For gzip decompression
+- **libjpeg** (optional) - For JPEG lossy compression
+- **libwebp** (optional) - For WebP lossy compression
 
-| File | Layout | Compression | Size | URL |
-|------|--------|-------------|------|-----|
-| `tci_sequential_gzip.parquet` | Sequential | gzip | 256 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_sequential_gzip.parquet) |
-| `tci_interleaved_gzip.parquet` | Interleaved | gzip | 286 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_interleaved_gzip.parquet) |
-| `tci_interleaved_jpeg.parquet` | Interleaved | JPEG (q85) | 27 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_interleaved_jpeg.parquet) |
-| `tci_interleaved_webp.parquet` | Interleaved | WebP (q90) | 17 MB | [Download](https://storage.googleapis.com/raquet_demo_data/experimental/tci_interleaved_webp.parquet) |
+## License
 
-*All experimental files contain the same Sentinel-2 TCI imagery (Sudan/Nile region, 10980×10980 pixels, 3 bands RGB uint8).*
+Apache 2.0
 
-**Time-Series Sample Data:**
+## Related Projects
 
-| File | Description | Time Range | Tiles × Time Steps |
-|------|-------------|------------|-------------------|
-| `cfsr_sst.parquet` | CFSR Sea Surface Temperature (monthly) | 1980-2015 | 3 × 432 = 1,296 rows |
-
-*Note: Time-series example available in the [raquet repository](https://github.com/CartoDB/raquet/tree/main/examples)*
-
-**Quick test with sample data:**
-
-```sql
--- With httpfs extension for remote access
-INSTALL httpfs;
-LOAD httpfs;
-LOAD raquet;
-
--- Query Riyadh satellite data
-SELECT
-    block,
-    quadbin_resolution(block) as zoom,
-    (quadbin_to_bbox(block)).*
-FROM read_raquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/riyadh.parquet')
-LIMIT 5;
-
--- Get pixel value from NAIP imagery
-SELECT ST_RasterValue(
-    block, band_1, -73.22, 40.91, 'uint8', 256, 'gzip'
-) as red_value
-FROM read_raquet('https://storage.googleapis.com/bq_ee_exports/raquet-test/naip_test.parquet')
-WHERE block = quadbin_from_lonlat(-73.22, 40.91, 18);
-```
-
-## Roadmap
-
-**Implemented:**
-- [x] `quadbin_to_parent()` - Get parent cell at lower resolution
-- [x] `quadbin_to_children()` - Get child cells at higher resolution
-- [x] `quadbin_kring()` - Get neighboring cells
-- [x] `quadbin_sibling()` - Get sibling cells
-- [x] `quadbin_polyfill()` - Fill polygon with QUADBIN cells
-- [x] `ST_RegionStats()` - Aggregate raster statistics within polygon regions
-- [x] `ST_Intersects()` / `ST_Contains()` - PostGIS-like spatial predicates
-- [x] `ST_GeomFromQuadbin()` - Convert QUADBIN cell to GEOMETRY
-- [x] `ST_Clip()` / `ST_ClipMask()` - Clip rasters to geometry boundaries
-- [x] `read_raquet()` - Table macro with automatic metadata handling
-- [x] `read_raquet_metadata()` - Table macro for metadata-only reads
-- [x] `ST_NDVI()` / `ST_NormalizedDifference()` - Vegetation and spectral indices
-- [x] `ST_BandMath()` - Generic band arithmetic operations
-- [x] Time-series support with CF conventions (NetCDF compatible)
-- [x] Cloud-native access via httpfs (S3/GCS/HTTP)
-- [x] **v0.4.0:** Interleaved band layout (BIP) support
-- [x] **v0.4.0:** JPEG lossy compression support
-- [x] **v0.4.0:** WebP lossy compression support
-
-**Planned:**
-- [ ] Time-aware filtering in `read_raquet()` macro
-- [ ] Performance optimizations for batch pixel extraction
-- [ ] Streaming support for large raster files
-- [ ] `ST_Resample()` - Change raster resolution (nearest-neighbor)
+- [Raquet Specification](https://github.com/CartoDB/raquet)
+- [DuckDB](https://duckdb.org)
+- [DuckDB Spatial](https://github.com/duckdb/duckdb-spatial)
+- [CARTO Analytics Toolbox](https://docs.carto.com/data-and-analysis/analytics-toolbox-for-bigquery/sql-reference/raster)

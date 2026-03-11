@@ -167,24 +167,20 @@ LOAD raquet;
 
 -- Single point extraction from GCS (downloads ~2KB)
 SELECT
-    raquet_pixel(band_1, 'uint8',
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
-        (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
-        256, 'gzip') as red
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
-WHERE block = quadbin_from_lonlat(33.5, 16.85, 14);
+    ST_RasterValue(block, band_1, ST_Point(33.5, 16.85), metadata) as red
+FROM read_raquet_at('https://storage.googleapis.com/sdsc_demo25/TCI.parquet', 33.5, 16.85);
 
 -- Aggregate stats on specific zoom level
 SELECT COUNT(*) as tiles,
-       AVG((ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip', 0)).mean) as avg
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
+       AVG((ST_RasterSummaryStats(band_1, metadata)).mean) as avg
+FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
 WHERE quadbin_resolution(block) = 14;
 
 -- Resolution-based filtering (only z13 tiles)
 SELECT quadbin_resolution(block) as res,
        COUNT(*) as tiles,
-       SUM((ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip', 0)).count) as pixels
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
+       SUM((ST_RasterSummaryStats(band_1, metadata)).count) as pixels
+FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
 WHERE quadbin_resolution(block) = 13
 GROUP BY res;
 ```
@@ -281,25 +277,19 @@ For comparison, downloading the full 261MB file would take ~20s on a 100Mbps con
 LOAD raquet;
 
 -- Single point
-SELECT raquet_pixel(band_1, 'uint8',
-    (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_x,
-    (quadbin_pixel_xy(33.5, 16.85, 14, 256)).pixel_y,
-    256, 'gzip')
-FROM read_parquet('data.parquet')
-WHERE block = quadbin_from_lonlat(33.5, 16.85, 14);
+SELECT ST_RasterValue(block, band_1, ST_Point(33.5, 16.85), metadata)
+FROM read_raquet_at('data.parquet', 33.5, 16.85);
 
 -- All tiles statistics
 SELECT
     COUNT(*) as num_tiles,
-    SUM((ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip', 0)).count) as pixels,
-    AVG((ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip', 0)).mean) as mean
-FROM read_parquet('data.parquet')
-WHERE block != 0;
+    SUM((ST_RasterSummaryStats(band_1, metadata)).count) as pixels,
+    AVG((ST_RasterSummaryStats(band_1, metadata)).mean) as mean
+FROM read_raquet('data.parquet');
 
 -- Band math
 SELECT ST_NormalizedDifferenceStats(band_2, band_1, metadata) as stats
-FROM read_parquet('data.parquet')
-WHERE block != 0;
+FROM read_raquet('data.parquet');
 ```
 
 ### PostGIS Raster

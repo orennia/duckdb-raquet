@@ -18,11 +18,10 @@
 SELECT '=== Q1: Point Query (ST_RasterValue) ===' as benchmark;
 
 SELECT
-    ST_RasterValue(block, band_1, 'POINT(-3.7 40.4)'::GEOMETRY, metadata) as red,
-    ST_RasterValue(block, band_2, 'POINT(-3.7 40.4)'::GEOMETRY, metadata) as green,
-    ST_RasterValue(block, band_3, 'POINT(-3.7 40.4)'::GEOMETRY, metadata) as blue
-FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
-WHERE quadbin_contains(block, 'POINT(-3.7 40.4)'::GEOMETRY);
+    ST_RasterValue(block, band_1, ST_Point(33.5, 16.85), metadata) as red,
+    ST_RasterValue(block, band_2, ST_Point(33.5, 16.85), metadata) as green,
+    ST_RasterValue(block, band_3, ST_Point(33.5, 16.85), metadata) as blue
+FROM read_raquet_at('https://storage.googleapis.com/sdsc_demo25/TCI.parquet', 33.5, 16.85);
 
 -- ============================================================================
 -- Q2: Tile Statistics - Compute stats for a single tile
@@ -32,31 +31,24 @@ SELECT '=== Q2: Tile Statistics (ST_RasterSummaryStats) ===' as benchmark;
 
 SELECT
     block,
-    ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip') as stats
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
-WHERE block != 0
+    ST_RasterSummaryStats(band_1, metadata) as stats
+FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
 LIMIT 1;
 
 -- ============================================================================
 -- Q3: Region Statistics - Stats over a geographic polygon
 -- ============================================================================
 
-SELECT '=== Q3: Region Statistics (Madrid area) ===' as benchmark;
+SELECT '=== Q3: Region Statistics ===' as benchmark;
 
--- Small region around Madrid
-WITH madrid_region AS (
-    SELECT 'POLYGON((-3.8 40.35, -3.6 40.35, -3.6 40.5, -3.8 40.5, -3.8 40.35))'::GEOMETRY as geom
-),
-intersecting_tiles AS (
-    SELECT r.block, r.band_1, r.metadata
-    FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet') r, madrid_region m
-    WHERE quadbin_intersects(r.block, m.geom)
-)
 SELECT
     count(*) as tile_count,
-    sum((ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip')).count) as total_pixels,
-    avg((ST_RasterSummaryStats(band_1, 'uint8', 256, 256, 'gzip')).mean) as avg_mean
-FROM intersecting_tiles;
+    sum((ST_RasterSummaryStats(band_1, metadata)).count) as total_pixels,
+    avg((ST_RasterSummaryStats(band_1, metadata)).mean) as avg_mean
+FROM read_raquet(
+    'https://storage.googleapis.com/sdsc_demo25/TCI.parquet',
+    'POLYGON((33.4 16.8, 33.6 16.8, 33.6 16.9, 33.4 16.9, 33.4 16.8))'::GEOMETRY
+);
 
 -- ============================================================================
 -- Q4: Count tiles at each resolution
@@ -67,8 +59,7 @@ SELECT '=== Q4: Resolution distribution ===' as benchmark;
 SELECT
     quadbin_resolution(block) as resolution,
     count(*) as tile_count
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
-WHERE block != 0
+FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
 GROUP BY quadbin_resolution(block)
 ORDER BY resolution;
 
@@ -76,15 +67,13 @@ ORDER BY resolution;
 -- Q5: Bounding box query - Find all tiles in an area
 -- ============================================================================
 
-SELECT '=== Q5: Bounding box query (Spain) ===' as benchmark;
+SELECT '=== Q5: Spatial filter ===' as benchmark;
 
-WITH spain_bbox AS (
-    SELECT 'POLYGON((-9.5 35.9, 3.3 35.9, 3.3 43.8, -9.5 43.8, -9.5 35.9))'::GEOMETRY as geom
-)
-SELECT count(*) as tiles_in_spain
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet') r, spain_bbox s
-WHERE block != 0
-  AND quadbin_intersects(r.block, s.geom);
+SELECT count(*) as tiles_in_area
+FROM read_raquet(
+    'https://storage.googleapis.com/sdsc_demo25/TCI.parquet',
+    'POLYGON((33.0 16.5, 34.0 16.5, 34.0 17.0, 33.0 17.0, 33.0 16.5))'::GEOMETRY
+);
 
 -- ============================================================================
 -- Q6: Full table scan with aggregation
@@ -97,7 +86,6 @@ SELECT
     count(DISTINCT quadbin_resolution(block)) as resolution_levels,
     min(quadbin_resolution(block)) as min_resolution,
     max(quadbin_resolution(block)) as max_resolution
-FROM read_parquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet')
-WHERE block != 0;
+FROM read_raquet('https://storage.googleapis.com/sdsc_demo25/TCI.parquet');
 
 SELECT '=== Benchmark Complete ===' as status;

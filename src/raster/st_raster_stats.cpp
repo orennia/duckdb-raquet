@@ -238,18 +238,19 @@ static void STRasterSummaryStatsMetadataFunction(DataChunk &args, ExpressionStat
     result.SetVectorType(VectorType::FLAT_VECTOR);
 }
 
-// ST_RasterSummaryStats(band BLOB, metadata VARCHAR, band_index INT) -> STRUCT
-// Multi-band variant: uses band_index to get the correct dtype and nodata
-static void STRasterSummaryStatsMetadataBandFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+// ST_RasterSummaryStats(band BLOB, metadata VARCHAR, nodata DOUBLE) -> STRUCT
+// Metadata-aware variant with explicit nodata override
+static void STRasterSummaryStatsMetadataNodataFunction(DataChunk &args, ExpressionState &state, Vector &result) {
     args.data[0].Flatten(args.size());
     args.data[1].Flatten(args.size());
     args.data[2].Flatten(args.size());
 
     auto band_data = FlatVector::GetData<string_t>(args.data[0]);
     auto metadata_data = FlatVector::GetData<string_t>(args.data[1]);
-    auto band_idx_data = FlatVector::GetData<int32_t>(args.data[2]);
+    auto nodata_data = FlatVector::GetData<double>(args.data[2]);
 
     auto &band_validity = FlatVector::Validity(args.data[0]);
+    auto &nodata_validity = FlatVector::Validity(args.data[2]);
 
     auto &struct_entries = StructVector::GetEntries(result);
     auto count_data = FlatVector::GetData<int64_t>(*struct_entries[0]);
@@ -268,22 +269,19 @@ static void STRasterSummaryStatsMetadataBandFunction(DataChunk &args, Expression
         }
 
         auto band = band_data[i];
-        auto band_idx = band_idx_data[i];
-
-        if (band.GetSize() == 0 || band_idx < 0) {
+        if (band.GetSize() == 0) {
             result_validity.SetInvalid(i);
             continue;
         }
 
         try {
             auto meta = raquet::parse_metadata(metadata_data[i].GetString());
-            std::string dtype = meta.get_band_type(band_idx);
+            std::string dtype = meta.bands.empty() ? "uint8" : meta.bands[0].second;
             bool compressed = (meta.compression == "gzip");
 
-            // Check for nodata from band_info
-            bool has_nodata = band_idx < static_cast<int32_t>(meta.band_info.size()) &&
-                              meta.band_info[band_idx].has_nodata;
-            double nodata = has_nodata ? meta.band_info[band_idx].nodata : 0.0;
+            // Use explicit nodata parameter (NULL-aware via validity)
+            bool has_nodata = nodata_validity.RowIsValid(i);
+            double nodata = has_nodata ? nodata_data[i] : 0.0;
 
             auto stats = raquet::compute_band_stats(
                 reinterpret_cast<const uint8_t*>(band.GetData()),
@@ -341,13 +339,13 @@ void RegisterRasterStatsFunctions(ExtensionLoader &loader) {
         STRasterSummaryStatsMetadataFunction);
     loader.RegisterFunction(stats_meta_fn);
 
-    // ST_RasterSummaryStats(band, metadata, band_index) -> STRUCT
-    // Multi-band metadata-aware variant
-    ScalarFunction stats_meta_band_fn("ST_RasterSummaryStats",
-        {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::INTEGER},
+    // ST_RasterSummaryStats(band, metadata, nodata) -> STRUCT
+    // Metadata-aware with explicit nodata override
+    ScalarFunction stats_meta_nodata_fn("ST_RasterSummaryStats",
+        {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::DOUBLE},
         stats_type,
-        STRasterSummaryStatsMetadataBandFunction);
-    loader.RegisterFunction(stats_meta_band_fn);
+        STRasterSummaryStatsMetadataNodataFunction);
+    loader.RegisterFunction(stats_meta_nodata_fn);
 }
 
 } // namespace duckdb

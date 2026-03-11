@@ -166,11 +166,23 @@ FROM test_stats_meta
 ----
 4	100.0	25.0	10.0	40.0	12.9099
 
-# ST_RasterSummaryStats(band, metadata, band_index) should also work
+# ST_RasterSummaryStats(band, metadata, nodata) should filter with explicit nodata
 query I
-SELECT (ST_RasterSummaryStats(band_1, metadata, 0)).count FROM test_stats_meta
+SELECT (ST_RasterSummaryStats(band_1, metadata, 10.0)).count FROM test_stats_meta
 ----
-4
+3
+
+# ST_Band(metadata, band_name) should return band index
+query I
+SELECT ST_Band(metadata, 'band_1') FROM test_stats_meta
+----
+0
+
+# ST_Band with nonexistent band should return NULL
+query I
+SELECT ST_Band(metadata, 'nonexistent') FROM test_stats_meta
+----
+NULL
 
 statement ok
 DROP TABLE test_stats_meta

@@ -47,7 +47,7 @@ Performance comparison between DuckDB raquet extension (C++) and BigQuery raquet
 2. **Native C++ implementation**: No JavaScript UDF overhead
 3. **Direct GCS access**: Works without loading data into tables first
 4. **No cold start**: Extension loads in <1s
-5. **Simpler spatial predicates**: `quadbin_intersects()` works across all resolutions
+5. **Simpler spatial predicates**: `read_raquet()` with geometry filter works across all resolutions
 
 ### BigQuery Observations
 
@@ -130,11 +130,10 @@ bq ls --routines cartobq:raquet
 
 ### Point Query
 
-**DuckDB** (cleaner, automatic filtering):
+**DuckDB** (cleaner, automatic filtering via `read_raquet_at`):
 ```sql
-SELECT ST_RasterValue(block, band_1, 'POINT(33.5 16.5)'::GEOMETRY, metadata)
-FROM read_raquet('file.parquet')
-WHERE quadbin_contains(block, 'POINT(33.5 16.5)'::GEOMETRY);
+SELECT ST_RasterValue(block, band_1, ST_Point(33.5, 16.5), metadata)
+FROM read_raquet_at('file.parquet', 33.5, 16.5);
 ```
 
 **BigQuery** (requires explicit block lookup):
@@ -147,10 +146,10 @@ WHERE r.block = QUADBIN_FROMGEOGPOINT(ST_GEOGPOINT(33.5, 16.5), 14);
 
 ### Key API Differences
 
-1. **Geometry handling**: DuckDB uses `::GEOMETRY` cast, BigQuery uses lon/lat
-2. **Spatial filtering**: DuckDB has `quadbin_contains()`, BigQuery needs `QUADBIN_FROMGEOGPOINT()`
+1. **Geometry handling**: DuckDB uses `ST_Point()` / `::GEOMETRY` cast, BigQuery uses lon/lat
+2. **Spatial filtering**: DuckDB has `read_raquet_at()` and `read_raquet(file, geometry)`, BigQuery needs `QUADBIN_FROMGEOGPOINT()`
 3. **Metadata**: DuckDB propagates automatically via `read_raquet()`, BigQuery needs explicit CTE
-4. **Band index**: DuckDB infers from metadata, BigQuery requires explicit index
+4. **Band access**: DuckDB infers from metadata (or use `band_name` / `ST_Band()`), BigQuery requires explicit index
 
 ## Files
 
