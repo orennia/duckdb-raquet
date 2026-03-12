@@ -31,48 +31,45 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
     // 1-arg: Basic read - propagates metadata from metadata row to all data rows
     {DEFAULT_SCHEMA, "read_raquet", {"file", nullptr}, {{nullptr, nullptr}},
      R"(
-        WITH src AS (SELECT * FROM read_parquet(file))
         SELECT * REPLACE (
-            (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0 LIMIT 1) AS metadata
         )
-        FROM src
+        FROM read_parquet(file)
         WHERE block != 0
      )"},
 
     // 2-arg: Spatial filter with auto-detected max resolution
-    // LIST_MIN/LIST_MAX enables Parquet row group pruning (constant-folded), IN does exact filtering
+    // file_resolution CTE only scans for max zoom, data read is separate to preserve pushdown
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", nullptr}, {{nullptr, nullptr}},
      R"(
-        WITH src AS (SELECT * FROM read_parquet(file)),
-        file_resolution AS (
+        WITH file_resolution AS (
             SELECT MAX(quadbin_resolution(block)) AS res
-            FROM src
+            FROM read_parquet(file)
             WHERE block != 0
         )
         SELECT * REPLACE (
-            (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0 LIMIT 1) AS metadata
         )
-        FROM src
+        FROM read_parquet(file)
         WHERE block BETWEEN
               LIST_MIN(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects'))
               AND LIST_MAX(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects'))
-          AND block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects')))
+          AND list_contains(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects'), block)
           AND block != 0
      )"},
 
     // 3-arg: Spatial filter with explicit resolution
-    // LIST_MIN/LIST_MAX enables Parquet row group pruning (constant-folded), IN does exact filtering
+    // No CTE: reads data and metadata from separate read_parquet calls to avoid scan interference
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", "resolution", nullptr}, {{nullptr, nullptr}},
      R"(
-        WITH src AS (SELECT * FROM read_parquet(file))
         SELECT * REPLACE (
-            (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0 LIMIT 1) AS metadata
         )
-        FROM src
+        FROM read_parquet(file)
         WHERE block BETWEEN
               LIST_MIN(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
               AND LIST_MAX(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
-          AND block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
+          AND list_contains(QUADBIN_POLYFILL(geometry, resolution, 'intersects'), block)
           AND block != 0
      )"},
 
@@ -127,7 +124,7 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
         WHERE block::UBIGINT BETWEEN
               LIST_MIN(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects'))
               AND LIST_MAX(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects'))
-          AND block::UBIGINT IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects')))
+          AND list_contains(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects'), block::UBIGINT)
           AND block != 0
      )"},
 
@@ -142,7 +139,7 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
         WHERE block::UBIGINT BETWEEN
               LIST_MIN(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
               AND LIST_MAX(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
-          AND block::UBIGINT IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
+          AND list_contains(QUADBIN_POLYFILL(geometry, resolution, 'intersects'), block::UBIGINT)
           AND block != 0
      )"},
 
