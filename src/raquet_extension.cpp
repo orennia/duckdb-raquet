@@ -40,6 +40,7 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
      )"},
 
     // 2-arg: Spatial filter with auto-detected max resolution
+    // LIST_MIN/LIST_MAX enables Parquet row group pruning (constant-folded), IN does exact filtering
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM read_parquet(file)),
@@ -52,13 +53,15 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
             (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
         )
         FROM src
-        WHERE block IN (
-            SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects'))
-        )
-        AND block != 0
+        WHERE block BETWEEN
+              LIST_MIN(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects'))
+              AND LIST_MAX(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects'))
+          AND block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM file_resolution), 'intersects')))
+          AND block != 0
      )"},
 
     // 3-arg: Spatial filter with explicit resolution
+    // LIST_MIN/LIST_MAX enables Parquet row group pruning (constant-folded), IN does exact filtering
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", "resolution", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH src AS (SELECT * FROM read_parquet(file))
@@ -66,7 +69,10 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
             (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
         )
         FROM src
-        WHERE block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
+        WHERE block BETWEEN
+              LIST_MIN(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
+              AND LIST_MAX(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
+          AND block IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
           AND block != 0
      )"},
 
@@ -118,10 +124,11 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
             (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
         )
         FROM src
-        WHERE block::UBIGINT IN (
-            SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects'))
-        )
-        AND block != 0
+        WHERE block::UBIGINT BETWEEN
+              LIST_MIN(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects'))
+              AND LIST_MAX(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects'))
+          AND block::UBIGINT IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, (SELECT res FROM table_resolution), 'intersects')))
+          AND block != 0
      )"},
 
     // 3-arg: Spatial filter with explicit resolution
@@ -132,7 +139,10 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
             (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
         )
         FROM src
-        WHERE block::UBIGINT IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
+        WHERE block::UBIGINT BETWEEN
+              LIST_MIN(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
+              AND LIST_MAX(QUADBIN_POLYFILL(geometry, resolution, 'intersects'))
+          AND block::UBIGINT IN (SELECT UNNEST(QUADBIN_POLYFILL(geometry, resolution, 'intersects')))
           AND block != 0
      )"},
 
