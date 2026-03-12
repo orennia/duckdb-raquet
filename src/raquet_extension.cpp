@@ -38,14 +38,15 @@ static const DefaultTableMacro RAQUET_TABLE_MACROS[] = {
         WHERE block != 0
      )"},
 
-    // 2-arg: Spatial filter with auto-detected max resolution
-    // file_resolution CTE only scans for max zoom, data read is separate to preserve pushdown
+    // 2-arg: Spatial filter with auto-detected max resolution from metadata
+    // Reads max_zoom from block=0 metadata (fast) instead of scanning all block values
     {DEFAULT_SCHEMA, "read_raquet", {"file", "geometry", nullptr}, {{nullptr, nullptr}},
      R"(
         WITH file_resolution AS (
-            SELECT MAX(quadbin_resolution(block)) AS res
+            SELECT (raquet_parse_metadata(metadata)).max_zoom AS res
             FROM read_parquet(file)
-            WHERE block != 0
+            WHERE block = 0
+            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM read_parquet(file) WHERE block = 0 LIMIT 1) AS metadata
@@ -113,9 +114,10 @@ static const DefaultTableMacro RAQUET_FROM_TABLE_MACROS[] = {
      R"(
         WITH src AS (SELECT * FROM query_table(tbl)),
         table_resolution AS (
-            SELECT MAX(quadbin_resolution(block::UBIGINT)) AS res
+            SELECT (raquet_parse_metadata(metadata)).max_zoom AS res
             FROM src
-            WHERE block != 0
+            WHERE block = 0
+            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
@@ -156,9 +158,10 @@ static const DefaultTableMacro RAQUET_TABLE_AT_MACROS[] = {
      R"(
         WITH src AS (SELECT * FROM query_table(tbl)),
         table_resolution AS (
-            SELECT MAX(quadbin_resolution(block::UBIGINT)) AS res
+            SELECT (raquet_parse_metadata(metadata)).max_zoom AS res
             FROM src
-            WHERE block != 0
+            WHERE block = 0
+            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
@@ -172,9 +175,10 @@ static const DefaultTableMacro RAQUET_TABLE_AT_MACROS[] = {
      R"(
         WITH src AS (SELECT * FROM query_table(tbl)),
         table_resolution AS (
-            SELECT MAX(quadbin_resolution(block::UBIGINT)) AS res
+            SELECT (raquet_parse_metadata(metadata)).max_zoom AS res
             FROM src
-            WHERE block != 0
+            WHERE block = 0
+            LIMIT 1
         )
         SELECT * REPLACE (
             (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
@@ -207,16 +211,16 @@ static const DefaultTableMacro RAQUET_AT_TABLE_MACROS[] = {
     // Usage: SELECT ... FROM read_raquet_at('file.parquet', ST_Point(lon, lat))
     {DEFAULT_SCHEMA, "read_raquet_at", {"file", "point", nullptr}, {{nullptr, nullptr}},
      R"(
-        WITH src AS (SELECT * FROM read_parquet(file)),
-        file_resolution AS (
-            SELECT MAX(quadbin_resolution(block)) AS res
-            FROM src
-            WHERE block != 0
+        WITH file_resolution AS (
+            SELECT (raquet_parse_metadata(metadata)).max_zoom AS res
+            FROM read_parquet(file)
+            WHERE block = 0
+            LIMIT 1
         )
         SELECT * REPLACE (
-            (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0 LIMIT 1) AS metadata
         )
-        FROM src
+        FROM read_parquet(file)
         WHERE block = quadbin_from_lonlat(ST_X(point), ST_Y(point), (SELECT res FROM file_resolution))
      )"},
 
@@ -224,16 +228,16 @@ static const DefaultTableMacro RAQUET_AT_TABLE_MACROS[] = {
     // Usage: SELECT ... FROM read_raquet_at('file.parquet', lon, lat)
     {DEFAULT_SCHEMA, "read_raquet_at", {"file", "lon", "lat", nullptr}, {{nullptr, nullptr}},
      R"(
-        WITH src AS (SELECT * FROM read_parquet(file)),
-        file_resolution AS (
-            SELECT MAX(quadbin_resolution(block)) AS res
-            FROM src
-            WHERE block != 0
+        WITH file_resolution AS (
+            SELECT (raquet_parse_metadata(metadata)).max_zoom AS res
+            FROM read_parquet(file)
+            WHERE block = 0
+            LIMIT 1
         )
         SELECT * REPLACE (
-            (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0 LIMIT 1) AS metadata
         )
-        FROM src
+        FROM read_parquet(file)
         WHERE block = quadbin_from_lonlat(lon, lat, (SELECT res FROM file_resolution))
      )"},
 
@@ -241,11 +245,10 @@ static const DefaultTableMacro RAQUET_AT_TABLE_MACROS[] = {
     // Usage: SELECT ... FROM read_raquet_at('file.parquet', lon, lat, 13)
     {DEFAULT_SCHEMA, "read_raquet_at", {"file", "lon", "lat", "resolution", nullptr}, {{nullptr, nullptr}},
      R"(
-        WITH src AS (SELECT * FROM read_parquet(file))
         SELECT * REPLACE (
-            (SELECT metadata FROM src WHERE block = 0 LIMIT 1) AS metadata
+            (SELECT metadata FROM read_parquet(file) WHERE block = 0 LIMIT 1) AS metadata
         )
-        FROM src
+        FROM read_parquet(file)
         WHERE block = quadbin_from_lonlat(lon, lat, resolution)
      )"},
 
