@@ -239,9 +239,16 @@ SELECT * FROM read_raster(file, [named parameters...])
 | `band_layout` | `VARCHAR` | `'sequential'` | Band layout: `sequential` or `interleaved` |
 | `quality` | `INTEGER` | `85` | Compression quality for JPEG/WebP (1-100) |
 | `statistics` | `BOOLEAN` | `false` | Compute per-tile statistics (count, min, max, sum, mean, stddev) |
+| `zoom_strategy` | `VARCHAR` | `'auto'` | Zoom selection: `auto` (round), `lower` (floor, coarser), `upper` (ceil, finer) |
 
 **Output columns:** `block` (UBIGINT), `metadata` (VARCHAR), `band_1` ... `band_N` (BLOB).
 When `statistics=true`, adds `band_N_count`, `band_N_min`, `band_N_max`, `band_N_sum`, `band_N_mean`, `band_N_stddev` columns.
+
+**NetCDF time dimension:** When reading NetCDF files with CF time metadata, the time dimension info
+(`cf:units`, `cf:calendar`) is automatically included in the output metadata JSON.
+
+**Parallelism:** Native-zoom tiles are processed in parallel (each thread opens its own GDAL handle).
+Use `overviews='none'` for maximum parallelism. Overview pyramid tiles are processed single-threaded.
 
 **Typical workflow:**
 ```sql
@@ -252,6 +259,19 @@ TO 'output.parquet' (FORMAT parquet);
 -- Then query with read_raquet
 SELECT ST_RasterValue(block, band_1, ST_Point(lon, lat), metadata)
 FROM read_raquet('output.parquet');
+```
+
+### Validation
+
+| Function | Description | Return |
+|----------|-------------|--------|
+| `raquet_validate_metadata(json)` | Validate raquet metadata JSON | `STRUCT(is_valid, errors, warnings, num_blocks, num_bands, zoom_range)` |
+
+Validates metadata structure: file_format, compression, tiling scheme, zoom ranges, band types.
+
+```sql
+-- Validate a raquet file's metadata
+SELECT raquet_validate_metadata(metadata) FROM read_raquet_metadata('file.parquet');
 ```
 
 ### Advanced / Internal Functions

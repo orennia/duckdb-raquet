@@ -54,6 +54,11 @@ struct RaquetMetadata {
     std::vector<BandInfo> band_info;  // Full band info including nodata
     std::vector<std::pair<std::string, std::string>> bands;  // name -> type (for backward compat)
 
+    // CF time dimension metadata (NetCDF)
+    bool has_time = false;
+    std::string time_cf_units;   // e.g., "minutes since 1980-01-01 00:00:00"
+    std::string time_calendar;   // e.g., "standard"
+
     // Get band type by index (0-based) or name
     std::string get_band_type(int band_index) const {
         if (band_index < 0 || band_index >= static_cast<int>(bands.size())) {
@@ -213,6 +218,14 @@ struct RaquetMetadata {
                 json += "\"" + tile_statistics_columns[i] + "\"";
             }
             json += "]";
+        }
+
+        // CF time dimension
+        if (has_time) {
+            json += ",\"time\":{";
+            json += "\"cf:units\":\"" + time_cf_units + "\"";
+            json += ",\"cf:calendar\":\"" + time_calendar + "\"";
+            json += "}";
         }
 
         json += "}";

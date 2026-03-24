@@ -127,6 +127,13 @@ struct ReadRasterBindData : public TableFunctionData {
     GDALResampleAlg resampling = GRA_NearestNeighbour;
     std::string band_layout = "sequential";
     std::string overviews = "auto";
+    std::string zoom_strategy = "auto"; // auto, lower, upper
+
+    // CF time dimension (NetCDF)
+    bool has_cf_time = false;
+    std::string cf_units_string;        // e.g., "minutes since 1980-01-01 00:00:00"
+    std::string cf_calendar;            // e.g., "standard"
+    std::vector<double> cf_time_values; // time value per band
 
     // Source CRS WKT for coordinate transformation
     std::string src_wkt;
@@ -484,12 +491,16 @@ static double CalculateResolution(GDALDatasetH ds, OGRCoordinateTransformationH 
 // ─────────────────────────────────────────────
 // Helper: Calculate zoom from resolution (matches CLI find_zoom)
 // ─────────────────────────────────────────────
-static int CalculateZoom(double resolution, int block_zoom) {
-    // mercantile.CE / 2 = half circumference of earth in web mercator meters
+static int CalculateZoom(double resolution, int block_zoom, const std::string &strategy = "auto") {
     constexpr double CE = 2.0 * quadbin::PI * quadbin::EARTH_RADIUS; // ~40075016.68
     double tile_dim = std::pow(2.0, block_zoom);
     double raw_zoom = std::log(CE / tile_dim / resolution) / std::log(2.0);
-    return static_cast<int>(std::round(raw_zoom));
+    if (strategy == "lower") {
+        return static_cast<int>(std::floor(raw_zoom));
+    } else if (strategy == "upper") {
+        return static_cast<int>(std::ceil(raw_zoom));
+    }
+    return static_cast<int>(std::round(raw_zoom)); // "auto" = round
 }
 
 // ─────────────────────────────────────────────
@@ -576,6 +587,12 @@ static unique_ptr<FunctionData> ReadRasterBind(ClientContext &context,
             bind_data->compression_quality = kv.second.GetValue<int32_t>();
         } else if (kv.first == "statistics") {
             bind_data->statistics = kv.second.GetValue<bool>();
+        } else if (kv.first == "zoom_strategy") {
+            bind_data->zoom_strategy = StringUtil::Lower(kv.second.GetValue<string>());
+            if (bind_data->zoom_strategy != "auto" && bind_data->zoom_strategy != "lower" &&
+                bind_data->zoom_strategy != "upper") {
+                throw InvalidInputException("zoom_strategy must be 'auto', 'lower', or 'upper'");
+            }
         }
     }
 
@@ -636,6 +653,57 @@ static unique_ptr<FunctionData> ReadRasterBind(ClientContext &context,
         bind_data->band_has_offset.push_back(has_offset != 0 && offset != 0.0);
     }
 
+    // CF time dimension extraction (NetCDF)
+    {
+        char **md = GDALGetMetadata(ds, nullptr);
+        if (md) {
+            const char *time_units = CSLFetchNameValue(md, "time#units");
+            if (!time_units) {
+                // Try alternate metadata keys
+                for (int i = 0; md[i]; i++) {
+                    std::string entry(md[i]);
+                    auto eq = entry.find('=');
+                    if (eq != std::string::npos) {
+                        std::string key = entry.substr(0, eq);
+                        if (key.find("units") != std::string::npos &&
+                            StringUtil::Lower(key).find("time") != std::string::npos) {
+                            time_units = md[i] + eq + 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (time_units) {
+                bind_data->has_cf_time = true;
+                bind_data->cf_units_string = time_units;
+                const char *cal = CSLFetchNameValue(md, "time#calendar");
+                bind_data->cf_calendar = cal ? cal : "standard";
+
+                // Extract time values from NETCDF_DIM_time_VALUES
+                const char *tv = CSLFetchNameValue(md, "NETCDF_DIM_time_VALUES");
+                if (tv) {
+                    std::string vals(tv);
+                    // Format: "{val1,val2,val3,...}"
+                    size_t start = vals.find('{');
+                    size_t end = vals.find('}');
+                    if (start != std::string::npos && end != std::string::npos) {
+                        std::string inner = vals.substr(start + 1, end - start - 1);
+                        size_t pos = 0;
+                        while (pos < inner.size()) {
+                            size_t comma = inner.find(',', pos);
+                            if (comma == std::string::npos) comma = inner.size();
+                            try {
+                                bind_data->cf_time_values.push_back(
+                                    std::stod(inner.substr(pos, comma - pos)));
+                            } catch (...) {}
+                            pos = comma + 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // CRS detection
     OGRSpatialReferenceH src_srs = nullptr;
     const char *proj_wkt = GDALGetProjectionRef(ds);
@@ -680,7 +748,7 @@ static unique_ptr<FunctionData> ReadRasterBind(ClientContext &context,
     // Calculate resolution and zoom
     double resolution = CalculateResolution(ds, tx3857);
     if (bind_data->max_zoom == 0) {
-        bind_data->max_zoom = CalculateZoom(resolution, bind_data->block_zoom);
+        bind_data->max_zoom = CalculateZoom(resolution, bind_data->block_zoom, bind_data->zoom_strategy);
         // Clamp to valid range
         bind_data->max_zoom = std::max(0, std::min(26, bind_data->max_zoom));
     }
@@ -1037,6 +1105,13 @@ static void ReadRasterExecute(ClientContext &context, TableFunctionInput &data,
             meta.tile_statistics_columns = {"count", "min", "max", "sum", "mean", "stddev"};
         }
 
+        // CF time metadata
+        if (bind_data.has_cf_time) {
+            meta.has_time = true;
+            meta.time_cf_units = bind_data.cf_units_string;
+            meta.time_calendar = bind_data.cf_calendar;
+        }
+
         // Band info with extended metadata
         for (int b = 0; b < bind_data.raster_band_count; b++) {
             raquet::BandInfo bi;
@@ -1121,6 +1196,7 @@ void RegisterReadRaster(ExtensionLoader &loader) {
     func.named_parameters["band_layout"] = LogicalType::VARCHAR;
     func.named_parameters["quality"] = LogicalType::INTEGER;
     func.named_parameters["statistics"] = LogicalType::BOOLEAN;
+    func.named_parameters["zoom_strategy"] = LogicalType::VARCHAR;
 
     loader.RegisterFunction(func);
 }
