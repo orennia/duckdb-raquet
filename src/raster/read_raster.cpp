@@ -187,8 +187,11 @@ struct ReadRasterGlobalState : public GlobalTableFunctionState {
     bool has_overviews = false;
 
     idx_t MaxThreads() const override {
-        // Allow parallel execution for native-zoom tiles
-        return has_overviews ? 1 : 0; // 0 = let DuckDB decide based on system
+        // TODO: DuckDB table function parallelism not yet working as expected.
+        // The code is thread-safe (per-thread GDAL handles, mutex tile queue)
+        // but DuckDB doesn't seem to call Execute from multiple threads.
+        // Needs investigation into DuckDB's parallel table function protocol.
+        return 1;
     }
 
     ~ReadRasterGlobalState() {
