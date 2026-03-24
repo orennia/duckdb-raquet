@@ -21,9 +21,11 @@
 #include <cpl_vsi.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -145,41 +147,66 @@ struct OverviewFrame {
 };
 
 // ─────────────────────────────────────────────
-// Global state — tile work queue, shared GDAL handles
+// Global state — two-phase: parallel native zoom, then single-thread overviews
 // ─────────────────────────────────────────────
 struct ReadRasterGlobalState : public GlobalTableFunctionState {
-    // Work queue: stack of frames for recursive overview descent
-    std::vector<OverviewFrame> frames;
+    // Phase 1: Native-zoom tiles (parallel-safe, mutex-protected queue)
+    std::vector<RasterTile> native_tiles;
+    std::mutex tile_mutex;
+    idx_t next_tile_idx = 0;
 
-    // GDAL handles (opened once, shared across execute calls)
-    GDALDatasetH src_ds = nullptr;
-    GDALDriverH gtiff_driver = nullptr;
-    OGRSpatialReferenceH web_mercator_srs = nullptr;
-    char *web_mercator_wkt = nullptr;
+    // Phase 2: Overview frames (single-threaded, after all native tiles done)
+    std::vector<OverviewFrame> overview_frames;
+    bool overviews_built = false;
 
-    // Warp options
+    // GDAL handles for overview phase (single-threaded only)
+    GDALDatasetH overview_src_ds = nullptr;
+    GDALDriverH overview_driver = nullptr;
+    char *overview_wkt = nullptr;
+    OGRSpatialReferenceH overview_srs = nullptr;
+
+    // Shared config
     GDALResampleAlg source_resampling = GRA_NearestNeighbour;
     double nodata_value = 0;
     bool has_nodata = false;
+    std::string web_mercator_wkt_str;
 
     // Tracking
-    int total_blocks = 0;
+    std::atomic<int> total_blocks{0};
     bool metadata_emitted = false;
     bool finished = false;
 
+    // Whether we need overviews at all
+    bool has_overviews = false;
+
     idx_t MaxThreads() const override {
-        return 1; // GDAL is single-threaded
+        // Allow parallel execution for native-zoom tiles
+        return has_overviews ? 1 : 0; // 0 = let DuckDB decide based on system
     }
 
     ~ReadRasterGlobalState() {
-        // Clean up any remaining overview datasets
-        for (auto &frame : frames) {
+        for (auto &frame : overview_frames) {
             for (auto ds : frame.outputs) {
                 if (ds) GDALClose(ds);
             }
         }
+        if (overview_wkt) CPLFree(overview_wkt);
+        if (overview_srs) OSRDestroySpatialReference(overview_srs);
+        if (overview_src_ds) GDALClose(overview_src_ds);
+    }
+};
+
+// ─────────────────────────────────────────────
+// Local state — per-thread GDAL handles
+// ─────────────────────────────────────────────
+struct ReadRasterLocalState : public LocalTableFunctionState {
+    GDALDatasetH src_ds = nullptr;
+    GDALDriverH gtiff_driver = nullptr;
+    char *web_mercator_wkt = nullptr;
+    bool initialized = false;
+
+    ~ReadRasterLocalState() {
         if (web_mercator_wkt) CPLFree(web_mercator_wkt);
-        if (web_mercator_srs) OSRDestroySpatialReference(web_mercator_srs);
         if (src_ds) GDALClose(src_ds);
     }
 };
@@ -718,6 +745,21 @@ static unique_ptr<FunctionData> ReadRasterBind(ClientContext &context,
 }
 
 // ─────────────────────────────────────────────
+// Helper: Open GDAL dataset (with ASSUME_LONGLAT fallback)
+// ─────────────────────────────────────────────
+static GDALDatasetH OpenGDALDataset(const std::string &filename) {
+    GDALAllRegister();
+    GDALDatasetH ds = GDALOpen(filename.c_str(), GA_ReadOnly);
+    if (!ds) {
+        char **open_options = CSLSetNameValue(nullptr, "ASSUME_LONGLAT", "YES");
+        ds = GDALOpenEx(filename.c_str(), GDAL_OF_RASTER | GDAL_OF_READONLY,
+                        nullptr, const_cast<const char *const *>(open_options), nullptr);
+        CSLDestroy(open_options);
+    }
+    return ds;
+}
+
+// ─────────────────────────────────────────────
 // INIT GLOBAL
 // ─────────────────────────────────────────────
 static unique_ptr<GlobalTableFunctionState> ReadRasterInitGlobal(ClientContext &context,
@@ -725,22 +767,8 @@ static unique_ptr<GlobalTableFunctionState> ReadRasterInitGlobal(ClientContext &
     auto &bind_data = input.bind_data->Cast<ReadRasterBindData>();
     auto state = make_uniq<ReadRasterGlobalState>();
 
-    // Re-open GDAL dataset for execution
-    GDALAllRegister();
-    state->src_ds = GDALOpen(bind_data.filename.c_str(), GA_ReadOnly);
-    if (!state->src_ds) {
-        char **open_options = CSLSetNameValue(nullptr, "ASSUME_LONGLAT", "YES");
-        state->src_ds = GDALOpenEx(bind_data.filename.c_str(),
-                                    GDAL_OF_RASTER | GDAL_OF_READONLY,
-                                    nullptr, const_cast<const char *const *>(open_options), nullptr);
-        CSLDestroy(open_options);
-    }
-    if (!state->src_ds) {
-        throw IOException("Failed to re-open raster file: %s", bind_data.filename);
-    }
-
-    state->gtiff_driver = GDALGetDriverByName("GTiff");
     state->source_resampling = bind_data.resampling;
+    state->has_overviews = (bind_data.min_zoom < bind_data.max_zoom);
 
     // Nodata from first band
     if (!bind_data.band_nodatas.empty() && bind_data.band_has_nodata[0]) {
@@ -748,216 +776,241 @@ static unique_ptr<GlobalTableFunctionState> ReadRasterInitGlobal(ClientContext &
         state->has_nodata = true;
     }
 
-    // Set up Web Mercator SRS
-    state->web_mercator_srs = OSRNewSpatialReference(nullptr);
-    OSRImportFromEPSG(state->web_mercator_srs, 3857);
-    OSRExportToWkt(state->web_mercator_srs, &state->web_mercator_wkt);
+    // Cache Web Mercator WKT for local state initialization
+    OGRSpatialReferenceH merc = OSRNewSpatialReference(nullptr);
+    OSRImportFromEPSG(merc, 3857);
+    char *wkt = nullptr;
+    OSRExportToWkt(merc, &wkt);
+    state->web_mercator_wkt_str = wkt;
+    CPLFree(wkt);
+    OSRDestroySpatialReference(merc);
 
-    // Build frame stack for recursive overview descent (matches CLI logic)
-    auto min_zoom_tiles = EnumerateTiles(
+    // Build native-zoom tile list (these can be processed in parallel)
+    state->native_tiles = EnumerateTiles(
         bind_data.bounds_minlon, bind_data.bounds_minlat,
         bind_data.bounds_maxlon, bind_data.bounds_maxlat,
-        bind_data.min_zoom);
+        bind_data.max_zoom);
 
-    for (auto &tile : min_zoom_tiles) {
-        OverviewFrame frame;
-        frame.tile = tile;
+    // Build overview frames if needed (processed single-threaded after native tiles)
+    if (state->has_overviews) {
+        // Open GDAL dataset for overview phase
+        state->overview_src_ds = OpenGDALDataset(bind_data.filename);
+        if (!state->overview_src_ds) {
+            throw IOException("Failed to open raster file for overviews: %s", bind_data.filename);
+        }
+        state->overview_driver = GDALGetDriverByName("GTiff");
+        state->overview_srs = OSRNewSpatialReference(nullptr);
+        OSRImportFromEPSG(state->overview_srs, 3857);
+        OSRExportToWkt(state->overview_srs, &state->overview_wkt);
 
-        // If this tile is not at max zoom, enumerate its children recursively
-        if (tile.z < bind_data.max_zoom) {
-            // Find child tiles at max_zoom that intersect this tile's bounds
-            double minlon, minlat, maxlon, maxlat;
-            quadbin::tile_to_bbox_wgs84(tile.x, tile.y, tile.z, minlon, minlat, maxlon, maxlat);
-            auto children = EnumerateTiles(minlon, minlat, maxlon, maxlat, tile.z + 1);
-            for (auto &child : children) {
-                frame.inputs.push_back(child);
+        // Build overview frames for zoom levels below max_zoom
+        // Process from min_zoom up to max_zoom-1
+        for (int z = bind_data.min_zoom; z < bind_data.max_zoom; z++) {
+            auto tiles_at_zoom = EnumerateTiles(
+                bind_data.bounds_minlon, bind_data.bounds_minlat,
+                bind_data.bounds_maxlon, bind_data.bounds_maxlat, z);
+            for (auto &tile : tiles_at_zoom) {
+                OverviewFrame frame;
+                frame.tile = tile;
+                state->overview_frames.push_back(std::move(frame));
             }
         }
-
-        state->frames.push_back(std::move(frame));
     }
 
     return std::move(state);
 }
 
 // ─────────────────────────────────────────────
-// EXECUTE — process tiles and emit rows
+// INIT LOCAL — per-thread GDAL handles
+// ─────────────────────────────────────────────
+static unique_ptr<LocalTableFunctionState> ReadRasterInitLocal(ExecutionContext &context,
+                                                                TableFunctionInitInput &input,
+                                                                GlobalTableFunctionState *global_state) {
+    return make_uniq<ReadRasterLocalState>();
+}
+
+// ─────────────────────────────────────────────
+// Helper: Emit a tile row into the output DataChunk
+// ─────────────────────────────────────────────
+static void EmitTileRow(DataChunk &output, idx_t row_count,
+                         const ReadRasterBindData &bind_data,
+                         uint64_t block, const TileData &tile_data) {
+    idx_t col = 0;
+
+    // block column
+    FlatVector::GetData<uint64_t>(output.data[col])[row_count] = block;
+    col++;
+
+    // metadata column (NULL for data rows)
+    FlatVector::SetNull(output.data[col], row_count, true);
+    col++;
+
+    // band data columns
+    for (size_t b = 0; b < tile_data.compressed.size(); b++) {
+        auto &blob = tile_data.compressed[b];
+        auto str = StringVector::AddStringOrBlob(output.data[col],
+            string_t(reinterpret_cast<const char *>(blob.data()), blob.size()));
+        FlatVector::GetData<string_t>(output.data[col])[row_count] = str;
+        col++;
+    }
+
+    // Statistics columns
+    if (bind_data.statistics) {
+        for (size_t b = 0; b < tile_data.stats.size(); b++) {
+            auto &s = tile_data.stats[b];
+            FlatVector::GetData<int64_t>(output.data[col])[row_count] = s.count;  col++;
+            FlatVector::GetData<double>(output.data[col])[row_count] = s.min;     col++;
+            FlatVector::GetData<double>(output.data[col])[row_count] = s.max;     col++;
+            FlatVector::GetData<double>(output.data[col])[row_count] = s.sum;     col++;
+            FlatVector::GetData<double>(output.data[col])[row_count] = s.mean;    col++;
+            FlatVector::GetData<double>(output.data[col])[row_count] = s.stddev;  col++;
+        }
+    }
+}
+
+// ─────────────────────────────────────────────
+// EXECUTE — two-phase: parallel native zoom, then single-thread overviews
 // ─────────────────────────────────────────────
 static void ReadRasterExecute(ClientContext &context, TableFunctionInput &data,
                                DataChunk &output) {
     auto &bind_data = data.bind_data->Cast<ReadRasterBindData>();
     auto &state = data.global_state->Cast<ReadRasterGlobalState>();
+    auto &local = data.local_state->Cast<ReadRasterLocalState>();
 
     if (state.finished) {
         output.SetCardinality(0);
         return;
     }
 
+    // Lazy-init per-thread GDAL handles
+    if (!local.initialized) {
+        local.src_ds = OpenGDALDataset(bind_data.filename);
+        if (!local.src_ds) {
+            throw IOException("Thread failed to open raster: %s", bind_data.filename);
+        }
+        local.gtiff_driver = GDALGetDriverByName("GTiff");
+        OGRSpatialReferenceH srs = OSRNewSpatialReference(nullptr);
+        OSRImportFromEPSG(srs, 3857);
+        OSRExportToWkt(srs, &local.web_mercator_wkt);
+        OSRDestroySpatialReference(srs);
+        local.initialized = true;
+    }
+
     idx_t row_count = 0;
     idx_t max_rows = STANDARD_VECTOR_SIZE;
 
-    while (row_count < max_rows && !state.frames.empty()) {
-        auto &frame = state.frames.back();
+    // ── Phase 1: Native-zoom tiles (parallel) ──
+    while (row_count < max_rows) {
+        // Grab next tile from shared queue
+        idx_t my_idx;
+        {
+            std::lock_guard<std::mutex> lock(state.tile_mutex);
+            if (state.next_tile_idx >= state.native_tiles.size()) {
+                break; // No more native tiles
+            }
+            my_idx = state.next_tile_idx++;
+        }
 
-        if (frame.inputs.empty()) {
-            // Process this tile: either warp from source or build overview
+        auto &tile = state.native_tiles[my_idx];
+
+        // Create tile dataset and warp
+        GDALDatasetH tile_ds = CreateTileDataset(
+            local.gtiff_driver, local.web_mercator_wkt,
+            tile, bind_data.block_size,
+            bind_data.raster_band_count, bind_data.gdal_dtype,
+            state.nodata_value, state.has_nodata);
+
+        WarpIntoTile(local.src_ds, tile_ds, state.source_resampling,
+                     state.nodata_value, state.has_nodata);
+
+        bool empty = IsTileEmpty(tile_ds, state.nodata_value, state.has_nodata);
+
+        if (!empty) {
+            auto tile_data = ReadAndCompressBands(
+                tile_ds, bind_data.compression, bind_data.compression_quality,
+                bind_data.band_layout, bind_data.statistics,
+                bind_data.raquet_dtype, state.has_nodata, state.nodata_value);
+
+            uint64_t block = quadbin::tile_to_cell(tile.x, tile.y, tile.z);
+            EmitTileRow(output, row_count, bind_data, block, tile_data);
+            state.total_blocks++;
+            row_count++;
+        }
+
+        GDALClose(tile_ds);
+    }
+
+    // If we emitted rows from native tiles, return them
+    if (row_count > 0) {
+        output.SetCardinality(row_count);
+        return;
+    }
+
+    // ── Phase 2: Overview tiles (single-threaded, only one thread gets here) ──
+    if (state.has_overviews && !state.overviews_built) {
+        // Process overview frames bottom-up (highest zoom first)
+        // Sort by zoom descending so children are processed before parents
+        std::sort(state.overview_frames.begin(), state.overview_frames.end(),
+                  [](const OverviewFrame &a, const OverviewFrame &b) {
+                      return a.tile.z > b.tile.z;
+                  });
+
+        for (auto &frame : state.overview_frames) {
             GDALDatasetH tile_ds = CreateTileDataset(
-                state.gtiff_driver, state.web_mercator_wkt,
+                state.overview_driver, state.overview_wkt,
                 frame.tile, bind_data.block_size,
                 bind_data.raster_band_count, bind_data.gdal_dtype,
                 state.nodata_value, state.has_nodata);
 
-            if (frame.tile.z == bind_data.max_zoom) {
-                // Native zoom: warp from original source
-                WarpIntoTile(state.src_ds, tile_ds, state.source_resampling,
-                             state.nodata_value, state.has_nodata);
-            } else if (frame.outputs.empty()) {
-                // Overview with no children yet — try COG overview or warp from source
-                bool used_cog = false;
-                if (bind_data.src_is_web_mercator && bind_data.overview_count > 0) {
-                    int zoom_diff = bind_data.max_zoom - frame.tile.z;
-                    int reduction_factor = 1 << zoom_diff;
-                    // Find matching overview
-                    GDALRasterBandH src_band = GDALGetRasterBand(state.src_ds, 1);
-                    int src_xsize = GDALGetRasterBandXSize(src_band);
-                    for (int i = 0; i < bind_data.overview_count; i++) {
-                        GDALRasterBandH ovr = GDALGetOverview(src_band, i);
-                        if (ovr) {
-                            int ovr_xsize = GDALGetRasterBandXSize(ovr);
-                            double ovr_reduction = static_cast<double>(src_xsize) / ovr_xsize;
-                            if (std::abs(ovr_reduction - reduction_factor) / reduction_factor < 0.1) {
-                                WarpIntoTile(state.src_ds, tile_ds, GRA_NearestNeighbour,
-                                             state.nodata_value, state.has_nodata, i);
-                                used_cog = true;
-                                break;
-                            }
+            // Try COG overview first
+            bool used_cog = false;
+            if (bind_data.src_is_web_mercator && bind_data.overview_count > 0) {
+                int zoom_diff = bind_data.max_zoom - frame.tile.z;
+                int reduction_factor = 1 << zoom_diff;
+                GDALRasterBandH src_band = GDALGetRasterBand(state.overview_src_ds, 1);
+                int src_xsize = GDALGetRasterBandXSize(src_band);
+                for (int i = 0; i < bind_data.overview_count; i++) {
+                    GDALRasterBandH ovr = GDALGetOverview(src_band, i);
+                    if (ovr) {
+                        int ovr_xsize = GDALGetRasterBandXSize(ovr);
+                        double ovr_reduction = static_cast<double>(src_xsize) / ovr_xsize;
+                        if (std::abs(ovr_reduction - reduction_factor) / reduction_factor < 0.1) {
+                            WarpIntoTile(state.overview_src_ds, tile_ds, GRA_NearestNeighbour,
+                                         state.nodata_value, state.has_nodata, i);
+                            used_cog = true;
+                            break;
                         }
                     }
                 }
-                if (!used_cog) {
-                    // Warp directly from source at lower resolution
-                    WarpIntoTile(state.src_ds, tile_ds, GRA_Average,
-                                 state.nodata_value, state.has_nodata);
-                }
-            } else if (frame.outputs.size() == 1) {
-                // Single child: warp directly
-                WarpIntoTile(frame.outputs[0], tile_ds, GRA_Average,
-                             state.nodata_value, state.has_nodata);
-                GDALClose(frame.outputs[0]);
-                frame.outputs.clear();
-            } else {
-                // Multiple children: build VRT mosaic, then warp
-                char vrt_path[256];
-                snprintf(vrt_path, sizeof(vrt_path),
-                         "/vsimem/raquet-vrt-%d-%d-%d.vrt",
-                         frame.tile.z, frame.tile.x, frame.tile.y);
-
-                int n_datasets = static_cast<int>(frame.outputs.size());
-                GDALDatasetH vrt_ds = GDALBuildVRT(vrt_path, n_datasets,
-                                                    frame.outputs.data(), nullptr, nullptr, nullptr);
-                if (vrt_ds) {
-                    GDALFlushCache(vrt_ds);
-                    WarpIntoTile(vrt_ds, tile_ds, GRA_Average,
-                                 state.nodata_value, state.has_nodata);
-                    GDALClose(vrt_ds);
-                    VSIUnlink(vrt_path);
-                } else {
-                    // Fallback: sequential warp from each child
-                    for (auto child_ds : frame.outputs) {
-                        WarpIntoTile(child_ds, tile_ds, GRA_Average,
-                                     state.nodata_value, state.has_nodata);
-                    }
-                }
-                for (auto child_ds : frame.outputs) {
-                    GDALClose(child_ds);
-                }
-                frame.outputs.clear();
             }
 
-            // Check if tile is empty
+            if (!used_cog) {
+                // Warp from source at lower resolution
+                WarpIntoTile(state.overview_src_ds, tile_ds, GRA_Average,
+                             state.nodata_value, state.has_nodata);
+            }
+
             bool empty = IsTileEmpty(tile_ds, state.nodata_value, state.has_nodata);
 
-            if (!empty) {
-                // Read, compress bands, and optionally compute stats
+            if (!empty && row_count < max_rows) {
                 auto tile_data = ReadAndCompressBands(
                     tile_ds, bind_data.compression, bind_data.compression_quality,
                     bind_data.band_layout, bind_data.statistics,
                     bind_data.raquet_dtype, state.has_nodata, state.nodata_value);
 
-                // Compute QUADBIN cell ID
                 uint64_t block = quadbin::tile_to_cell(frame.tile.x, frame.tile.y, frame.tile.z);
-
-                // Emit row
-                idx_t col = 0;
-                // block column
-                FlatVector::GetData<uint64_t>(output.data[col])[row_count] = block;
-                col++;
-
-                // metadata column (NULL for data rows)
-                FlatVector::SetNull(output.data[col], row_count, true);
-                col++;
-
-                // band data columns
-                for (size_t b = 0; b < tile_data.compressed.size(); b++) {
-                    auto &blob = tile_data.compressed[b];
-                    auto str = StringVector::AddStringOrBlob(output.data[col],
-                        string_t(reinterpret_cast<const char *>(blob.data()), blob.size()));
-                    FlatVector::GetData<string_t>(output.data[col])[row_count] = str;
-                    col++;
-                }
-
-                // Statistics columns
-                if (bind_data.statistics) {
-                    for (size_t b = 0; b < tile_data.stats.size(); b++) {
-                        auto &s = tile_data.stats[b];
-                        FlatVector::GetData<int64_t>(output.data[col])[row_count] = s.count;  col++;
-                        FlatVector::GetData<double>(output.data[col])[row_count] = s.min;     col++;
-                        FlatVector::GetData<double>(output.data[col])[row_count] = s.max;     col++;
-                        FlatVector::GetData<double>(output.data[col])[row_count] = s.sum;     col++;
-                        FlatVector::GetData<double>(output.data[col])[row_count] = s.mean;    col++;
-                        FlatVector::GetData<double>(output.data[col])[row_count] = s.stddev;  col++;
-                    }
-                }
-
+                EmitTileRow(output, row_count, bind_data, block, tile_data);
                 state.total_blocks++;
                 row_count++;
             }
 
-            // Save tile_ds for parent overview if there are more frames
-            if (state.frames.size() > 1 && !empty) {
-                // Keep the tile dataset alive for the parent frame
-                state.frames[state.frames.size() - 2].outputs.push_back(tile_ds);
-            } else {
-                GDALClose(tile_ds);
-            }
-
-            state.frames.pop_back();
-
-        } else {
-            // Descend: pop a child tile and push it as a new frame
-            RasterTile child = frame.inputs.back();
-            frame.inputs.pop_back();
-
-            OverviewFrame child_frame;
-            child_frame.tile = child;
-
-            // If child is not at max zoom, enumerate its sub-children
-            if (child.z < bind_data.max_zoom) {
-                double minlon, minlat, maxlon, maxlat;
-                quadbin::tile_to_bbox_wgs84(child.x, child.y, child.z,
-                                             minlon, minlat, maxlon, maxlat);
-                auto grandchildren = EnumerateTiles(minlon, minlat, maxlon, maxlat, child.z + 1);
-                for (auto &gc : grandchildren) {
-                    child_frame.inputs.push_back(gc);
-                }
-            }
-
-            state.frames.push_back(std::move(child_frame));
+            GDALClose(tile_ds);
         }
+        state.overviews_built = true;
     }
 
-    // If no more frames and haven't emitted metadata yet, emit it
-    if (state.frames.empty() && !state.metadata_emitted) {
+    // ── Phase 3: Emit metadata row ──
+    if (!state.metadata_emitted) {
         // Build metadata
         raquet::RaquetMetadata meta;
         meta.file_format = "raquet";
@@ -1045,7 +1098,7 @@ static void ReadRasterExecute(ClientContext &context, TableFunctionInput &data,
         state.finished = true;
     }
 
-    if (state.frames.empty() && state.metadata_emitted) {
+    if (state.metadata_emitted) {
         state.finished = true;
     }
 
@@ -1057,7 +1110,7 @@ static void ReadRasterExecute(ClientContext &context, TableFunctionInput &data,
 // ─────────────────────────────────────────────
 void RegisterReadRaster(ExtensionLoader &loader) {
     TableFunction func("read_raster", {LogicalType::VARCHAR},
-                       ReadRasterExecute, ReadRasterBind, ReadRasterInitGlobal);
+                       ReadRasterExecute, ReadRasterBind, ReadRasterInitGlobal, ReadRasterInitLocal);
 
     func.named_parameters["compression"] = LogicalType::VARCHAR;
     func.named_parameters["resampling"] = LogicalType::VARCHAR;
