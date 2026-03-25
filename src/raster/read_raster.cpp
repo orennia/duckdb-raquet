@@ -10,6 +10,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 
 #include <gdal.h>
 #include <gdal_alg.h>
@@ -140,6 +141,9 @@ struct ReadRasterBindData : public TableFunctionData {
     bool src_is_web_mercator = false;
     int overview_count = 0;
 
+    // Estimated tile count (for cardinality estimation)
+    idx_t estimated_tiles = 0;
+
     // Output column names
     std::vector<std::string> column_names;
 };
@@ -187,11 +191,7 @@ struct ReadRasterGlobalState : public GlobalTableFunctionState {
     bool has_overviews = false;
 
     idx_t MaxThreads() const override {
-        // TODO: DuckDB table function parallelism not yet working as expected.
-        // The code is thread-safe (per-thread GDAL handles, mutex tile queue)
-        // but DuckDB doesn't seem to call Execute from multiple threads.
-        // Needs investigation into DuckDB's parallel table function protocol.
-        return 1;
+        return GlobalTableFunctionState::MAX_THREADS;
     }
 
     ~ReadRasterGlobalState() {
@@ -811,6 +811,12 @@ static unique_ptr<FunctionData> ReadRasterBind(ClientContext &context,
         }
     }
 
+    // Estimate tile count for cardinality (enables DuckDB parallelism)
+    auto est_tiles = EnumerateTiles(bind_data->bounds_minlon, bind_data->bounds_minlat,
+                                     bind_data->bounds_maxlon, bind_data->bounds_maxlat,
+                                     bind_data->max_zoom);
+    bind_data->estimated_tiles = est_tiles.size() + 1; // +1 for metadata row
+
     bind_data->column_names = names;
     return std::move(bind_data);
 }
@@ -1184,6 +1190,15 @@ static void ReadRasterExecute(ClientContext &context, TableFunctionInput &data,
 }
 
 // ─────────────────────────────────────────────
+// CARDINALITY — tell DuckDB how many rows to expect (enables parallelism)
+// ─────────────────────────────────────────────
+static unique_ptr<NodeStatistics> ReadRasterCardinality(ClientContext &context,
+                                                         const FunctionData *bind_data_p) {
+    auto &bind_data = bind_data_p->Cast<ReadRasterBindData>();
+    return make_uniq<NodeStatistics>(bind_data.estimated_tiles);
+}
+
+// ─────────────────────────────────────────────
 // REGISTRATION
 // ─────────────────────────────────────────────
 void RegisterReadRaster(ExtensionLoader &loader) {
@@ -1200,6 +1215,7 @@ void RegisterReadRaster(ExtensionLoader &loader) {
     func.named_parameters["quality"] = LogicalType::INTEGER;
     func.named_parameters["statistics"] = LogicalType::BOOLEAN;
     func.named_parameters["zoom_strategy"] = LogicalType::VARCHAR;
+    func.cardinality = ReadRasterCardinality;
 
     loader.RegisterFunction(func);
 }
