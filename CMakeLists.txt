@@ -92,12 +92,17 @@ if(GDAL_FOUND)
     if(PROJ_DB_FOUND)
         message(STATUS "Found proj.db: ${PROJ_DB_PATH}")
         set(PROJ_DB_C "${CMAKE_CURRENT_BINARY_DIR}/proj_db.c")
+        find_package(Python3 COMPONENTS Interpreter QUIET)
+        if(NOT Python3_FOUND)
+            find_program(Python3_EXECUTABLE NAMES python3 python)
+        endif()
         add_custom_command(
             OUTPUT "${PROJ_DB_C}"
-            COMMAND ${CMAKE_COMMAND} -E echo "Generating proj_db.c from ${PROJ_DB_PATH}..."
-            COMMAND xxd -i proj.db "${PROJ_DB_C}"
-            WORKING_DIRECTORY "${PROJ_DB_PATH}/.."
-            DEPENDS "${PROJ_DB_PATH}"
+            COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bin2c.py"
+                "${PROJ_DB_PATH}"
+                "${PROJ_DB_C}"
+            DEPENDS "${PROJ_DB_PATH}" "${CMAKE_CURRENT_SOURCE_DIR}/scripts/bin2c.py"
             COMMENT "Embedding proj.db into C source"
         )
         list(APPEND EXTENSION_SOURCES
