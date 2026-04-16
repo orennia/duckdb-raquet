@@ -17,7 +17,7 @@
     },
     {
       "name": "gdal",
-      "features": ["geos"]
+      "features": ["geos", "network"]
     }
   ],
   "vcpkg-configuration": {
