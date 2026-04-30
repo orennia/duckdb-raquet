@@ -91,6 +91,8 @@ jobs:
     - name: Test with sample data
       run: |
         ./build/release/duckdb -c "
+          INSTALL json;
+          LOAD json;
           LOAD 'build/release/extension/raquet/raquet.duckdb_extension';
 
           -- Test basic query
