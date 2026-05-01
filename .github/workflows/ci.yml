@@ -24,6 +24,14 @@ jobs:
 
     - name: Build extension (Release)
       run: |
+        # actions/checkout@v4 fetches the duckdb submodule shallowly by default,
+        # so `git describe --tags --long` inside duckdb/ fails and DuckDB's
+        # CMakeLists.txt falls back to embedding 'v0.0.1' as the binary's
+        # version. INSTALL <ext> then 404s against extensions.duckdb.org/v0.0.1/...
+        # Set OVERRIDE_GIT_DESCRIBE explicitly. Update the v1.5.2 below when
+        # bumping the duckdb submodule.
+        export OVERRIDE_GIT_DESCRIBE="v1.5.2-0-g$(cd duckdb && git rev-parse --short=10 HEAD)"
+        echo "OVERRIDE_GIT_DESCRIBE=$OVERRIDE_GIT_DESCRIBE"
         make release
 
     - name: Run SQL tests
@@ -54,6 +62,14 @@ jobs:
 
     - name: Build extension (Release)
       run: |
+        # actions/checkout@v4 fetches the duckdb submodule shallowly by default,
+        # so `git describe --tags --long` inside duckdb/ fails and DuckDB's
+        # CMakeLists.txt falls back to embedding 'v0.0.1' as the binary's
+        # version. INSTALL <ext> then 404s against extensions.duckdb.org/v0.0.1/...
+        # Set OVERRIDE_GIT_DESCRIBE explicitly. Update the v1.5.2 below when
+        # bumping the duckdb submodule.
+        export OVERRIDE_GIT_DESCRIBE="v1.5.2-0-g$(cd duckdb && git rev-parse --short=10 HEAD)"
+        echo "OVERRIDE_GIT_DESCRIBE=$OVERRIDE_GIT_DESCRIBE"
         make release
 
     - name: Run SQL tests
@@ -86,6 +102,9 @@ jobs:
 
     - name: Build extension
       run: |
+        # See note in build-linux job for why OVERRIDE_GIT_DESCRIBE is needed.
+        export OVERRIDE_GIT_DESCRIBE="v1.5.2-0-g$(cd duckdb && git rev-parse --short=10 HEAD)"
+        echo "OVERRIDE_GIT_DESCRIBE=$OVERRIDE_GIT_DESCRIBE"
         make release
 
     - name: Test with sample data
