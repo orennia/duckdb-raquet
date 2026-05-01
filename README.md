@@ -231,7 +231,7 @@ SELECT * FROM read_raster(file, [named parameters...])
 |-----------|------|---------|-------------|
 | `file` | `VARCHAR` | (required) | Path to raster file |
 | `compression` | `VARCHAR` | `'gzip'` | Band compression: `gzip`, `jpeg`, `webp`, `none` |
-| `resampling` | `VARCHAR` | `'nearest'` | Resampling: `nearest`, `bilinear`, `cubic`, `cubicspline`, `lanczos`, `average`, `mode` |
+| `resampling` | `VARCHAR` | `'nearest'` | Resampling: `nearest`, `bilinear`, `cubic`, `cubicspline`, `lanczos`, `average`, `mode`, `max`, `min`, `med`, `q1`, `q3`, `sum`, `rms` |
 | `block_size` | `INTEGER` | `256` | Tile size in pixels: `256`, `512`, or `1024` |
 | `max_zoom` | `INTEGER` | auto | Maximum zoom level (auto-detected from resolution) |
 | `min_zoom` | `INTEGER` | auto | Minimum zoom level for overview pyramid |
@@ -240,8 +240,8 @@ SELECT * FROM read_raster(file, [named parameters...])
 | `quality` | `INTEGER` | `85` | Compression quality for JPEG/WebP (1-100) |
 | `statistics` | `BOOLEAN` | `false` | Compute per-tile statistics (count, min, max, sum, mean, stddev) |
 | `zoom_strategy` | `VARCHAR` | `'auto'` | Zoom selection: `auto` (round), `lower` (floor, coarser), `upper` (ceil, finer) |
-| `format` | `VARCHAR` | `'v0.5.0'` | Metadata format: `'v0.5.0'` (spec) or `'v0'` (legacy v0.1.0 shape consumed by raquet 0.2.5 / CARTO platform) |
-| `approx` | `BOOLEAN` | `true` | Use GDAL's `approxOK=TRUE` overview-based statistics (fast). Set `false` for exact full-resolution stats |
+| `format` | `VARCHAR` | `'v0.5.0'` | Metadata format: `'v0.5.0'` (spec) or `'v0'` (legacy v0.1.0 shape, drop-in compatible with Python `raster-loader 0.9.1` output — adds `quantiles`, `top_values`, per-band `nodata`, `stats.version` over the bare v0.1.0 spec) |
+| `approx` | `BOOLEAN` | `true` | Use GDAL's `approxOK=TRUE` overview-based statistics for the basic per-band stats (fast). Set `false` for an exact full-resolution scan. The flag also controls whether `quantiles` and `top_values` are computed from a 1000-pixel sample (approx) or from a full-band histogram (exact). Honoured by both `'v0'` and `'v0.5.0'` output formats |
 
 **Output columns:** `block` (UBIGINT), `metadata` (VARCHAR), `band_1` ... `band_N` (BLOB).
 When `statistics=true`, adds `band_N_count`, `band_N_min`, `band_N_max`, `band_N_sum`, `band_N_mean`, `band_N_stddev` columns.
@@ -249,8 +249,10 @@ When `statistics=true`, adds `band_N_count`, `band_N_min`, `band_N_max`, `band_N
 **NetCDF time dimension:** When reading NetCDF files with CF time metadata, the time dimension info
 (`cf:units`, `cf:calendar`) is automatically included in the output metadata JSON.
 
-**Parallelism:** Native-zoom tiles are processed in parallel (each thread opens its own GDAL handle).
-Use `overviews='none'` for maximum parallelism. Overview pyramid tiles are processed single-threaded.
+**Parallelism:** Both the native-zoom and overview-pyramid phases run in parallel. Each thread opens
+its own per-thread GDAL handle and pulls work off a shared atomic queue. Phase 2 (overview tiles)
+publishes a staged result queue when the last worker finishes warping, so partial-chunk emission
+across `Execute` calls is safe.
 
 **Typical workflow:**
 ```sql
