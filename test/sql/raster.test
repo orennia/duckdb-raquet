@@ -350,6 +350,133 @@ statement ok
 DROP TABLE test_nan_nodata
 
 # =============================================================================
+# ST_AsPNGRaquet / ST_ColorMapRaquet (v1: sequential gzip|none, discrete colormap JSON)
+# =============================================================================
+
+statement ok
+CREATE TABLE test_png_tile AS
+SELECT
+    1::UBIGINT AS block,
+    '\x0A\x14\x1E\x28'::BLOB AS band_1,
+    '{"file_format":"raquet","compression":"none","band_layout":"sequential","tiling":{"block_width":2,"block_height":2,"scheme":"quadbin"},"bands":[{"name":"band_1","type":"uint8"}]}'::VARCHAR AS metadata
+
+# PNG file signature (first 8 bytes → 16 hex chars)
+query I
+SELECT substring(hex(ST_AsPNGRaquet([band_1], metadata)), 1, 16) FROM test_png_tile
+----
+89504E470D0A1A0A
+
+# Grayscale PNG is non-trivial byte length
+query I
+SELECT octet_length(ST_AsPNGRaquet([band_1], metadata)) > 40 FROM test_png_tile
+----
+true
+
+# Discrete colormap → three uint8 band blobs; chain to RGB PNG (one colormap via CTE)
+query I
+WITH x AS (
+  SELECT
+    ST_ColorMapRaquet(
+      band_1,
+      metadata,
+      0.0,
+      '{"entries":[{"value":10,"r":255,"g":0,"b":0},{"value":20,"r":0,"g":255,"b":0},{"lo":30,"hi":40,"r":0,"g":0,"b":255}],"unmapped":"nodata"}'
+    ) AS m,
+    metadata
+  FROM test_png_tile
+)
+SELECT substring(hex(ST_AsPNGRaquet([x.m.band_r, x.m.band_g, x.m.band_b], x.metadata)), 1, 16) FROM x
+----
+89504E470D0A1A0A
+
+statement ok
+DROP TABLE test_png_tile
+
+# =============================================================================
+# ST_ColorMapRaquet(band, metadata): use embedded bands[].colortable when present
+# =============================================================================
+
+statement ok
+CREATE TABLE test_meta_palette AS
+SELECT
+    1::UBIGINT AS block,
+    '\x01\x02\x03\x04'::BLOB AS band_1,
+    '{"file_format":"raquet","compression":"none","band_layout":"sequential","tiling":{"block_width":2,"block_height":2,"scheme":"quadbin"},"bands":[{"name":"b","type":"uint8","colortable":{"1":[255,0,0,255],"2":[0,255,0,255],"3":[0,0,255,255],"4":[127,127,127,255]}}]}'::VARCHAR AS metadata
+
+query I
+WITH z AS (
+  SELECT ST_ColorMapRaquet(band_1, metadata) AS m, metadata FROM test_meta_palette
+)
+SELECT substring(hex(ST_AsPNGRaquet([z.m.band_r, z.m.band_g, z.m.band_b], z.metadata)), 1, 16) FROM z
+----
+89504E470D0A1A0A
+
+# Same palette via explicit band name (matches bands[].name)
+query I
+WITH z AS (
+  SELECT ST_ColorMapRaquet(band_1, 'b', metadata) AS m, metadata FROM test_meta_palette
+)
+SELECT substring(hex(ST_AsPNGRaquet([z.m.band_r, z.m.band_g, z.m.band_b], z.metadata)), 1, 16) FROM z
+----
+89504E470D0A1A0A
+
+statement ok
+DROP TABLE test_meta_palette
+
+# =============================================================================
+# ST_ColorMapContinuousRaquet — piecewise linear ramp (RGB lerp between stops)
+# =============================================================================
+
+statement ok
+CREATE TABLE test_cont_ramp AS
+SELECT
+    1::UBIGINT AS block,
+    -- float32 LE: 0, 5, 10, 15 for a 2×2 tile
+    '\x00\x00\x00\x00\x00\x00\xA0@\x00\x00\x20A\x00\x00pA'::BLOB AS band_1,
+    '{"file_format":"raquet","compression":"none","band_layout":"sequential","tiling":{"block_width":2,"block_height":2,"scheme":"quadbin"},"bands":[{"name":"slope","type":"float32"}]}'::VARCHAR AS metadata
+
+# Uncompressed sequential uint8 tile: 2×2 = 4 bytes per RGB plane
+query I
+SELECT octet_length((ST_ColorMapContinuousRaquet(band_1, metadata, '{"stops":[{"v":0,"hex":"#ff0000"},{"v":15,"hex":"#0000ff"}],"outside":"clamp"}'::VARCHAR)).band_r) FROM test_cont_ramp
+----
+4
+
+query I
+WITH z AS (
+  SELECT
+    ST_ColorMapContinuousRaquet(
+      band_1,
+      metadata,
+      '{"stops":[{"v":0,"hex":"#ff0000"},{"v":15,"hex":"#0000ff"}],"outside":"clamp"}'::VARCHAR
+    ) AS m,
+    metadata
+  FROM test_cont_ramp
+)
+SELECT substring(hex(ST_AsPNGRaquet([z.m.band_r, z.m.band_g, z.m.band_b], z.metadata)), 1, 16) FROM z
+----
+89504E470D0A1A0A
+
+# Named band overload (same blob + spec; band name must exist in metadata)
+query I
+WITH z AS (
+  SELECT
+    ST_ColorMapContinuousRaquet(
+      band_1,
+      'slope',
+      metadata,
+      '{"stops":[{"v":0,"hex":"#00ff00"},{"v":15,"hex":"#ff00ff"}],"outside":"clamp"}'::VARCHAR
+    ) AS m,
+    metadata
+  FROM test_cont_ramp
+)
+SELECT substring(hex(ST_AsPNGRaquet([z.m.band_r, z.m.band_g, z.m.band_b], z.metadata)), 1, 16) FROM z
+----
+89504E470D0A1A0A
+
+statement ok
+DROP TABLE test_cont_ramp
+
+# =============================================================================
 # Note: ST_RasterValue and spatial predicate functions use
 # DuckDB 1.5+ native GEOMETRY types. Create geometries using WKT cast:
 #   'POINT(-3.7 40.4)'::GEOMETRY

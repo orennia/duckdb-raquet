@@ -1,6 +1,8 @@
 #pragma once
 
 #include <array>
+#include <cctype>
+#include <cstdlib>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -8,6 +10,10 @@
 #include <stdexcept>
 #include <cmath>
 #include <limits>
+#include <stdexcept>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 namespace duckdb {
 namespace raquet {
@@ -28,6 +34,12 @@ struct BandInfo {
     bool has_scale;
     bool has_offset;
 
+    /// GDAL palette / band colortable embedded in metadata: class index → RGBA (RGBA used for ingestion; exporters may use RGB only).
+    std::unordered_map<int64_t, std::array<uint8_t, 4>> colortable;
+    bool has_colortable;
+
+    BandInfo() : nodata(0), has_nodata(false), scale(1.0), offset(0.0), has_scale(false), has_offset(false),
+                 has_colortable(false) {}
     // Palette color table (only populated when colorinterp == "palette").
     // Each entry is RGBA in [0, 255].
     std::vector<std::array<int, 4>> colortable;
@@ -59,10 +71,10 @@ struct BandInfo {
                  has_scale(false), has_offset(false) {}
     BandInfo(const std::string &n, const std::string &t)
         : name(n), type(t), nodata(0), has_nodata(false), scale(1.0), offset(0.0),
-          has_scale(false), has_offset(false) {}
+          has_scale(false), has_offset(false), has_colortable(false) {}
     BandInfo(const std::string &n, const std::string &t, double nd)
         : name(n), type(t), nodata(nd), has_nodata(true), scale(1.0), offset(0.0),
-          has_scale(false), has_offset(false) {}
+          has_scale(false), has_offset(false), has_colortable(false) {}
 };
 
 // Parsed raquet metadata (v0.4.0 format)
@@ -640,6 +652,103 @@ inline std::string extract_json_object(const std::string &json, const std::strin
     return json.substr(start, pos - start);
 }
 
+// Parse band "colortable" object: {"0":[r,g,b,a], "1":[...]} (string keys → integer class values).
+inline void parse_colortable_from_object_string(const std::string &json_braced,
+                                                std::unordered_map<int64_t, std::array<uint8_t, 4>> &out) {
+	out.clear();
+	auto is_ws = [](char c) {
+		return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+	};
+	size_t p = 0;
+	while (p < json_braced.size() && is_ws(json_braced[p])) {
+		p++;
+	}
+	if (p < json_braced.size() && json_braced[p] == '{') {
+		p++;
+	}
+	while (p < json_braced.size()) {
+		while (p < json_braced.size() && (is_ws(json_braced[p]) || json_braced[p] == ',')) {
+			p++;
+		}
+		if (p >= json_braced.size() || json_braced[p] == '}') {
+			break;
+		}
+		if (json_braced[p] != '"') {
+			break;
+		}
+		const size_t k0 = p + 1;
+		const size_t k1 = json_braced.find('"', k0);
+		if (k1 == std::string::npos) {
+			break;
+		}
+		int64_t key = 0;
+		try {
+			key = std::stoll(json_braced.substr(k0, k1 - k0));
+		} catch (...) {
+			p = k1 + 1;
+			continue;
+		}
+		p = k1 + 1;
+		while (p < json_braced.size() && is_ws(json_braced[p])) {
+			p++;
+		}
+		if (p >= json_braced.size() || json_braced[p] != ':') {
+			break;
+		}
+		p++;
+		while (p < json_braced.size() && is_ws(json_braced[p])) {
+			p++;
+		}
+		if (p >= json_braced.size() || json_braced[p] != '[') {
+			break;
+		}
+		const size_t bracket_open = p;
+		int bracket_depth = 0;
+		size_t j = bracket_open;
+		for (; j < json_braced.size(); j++) {
+			if (json_braced[j] == '[') {
+				bracket_depth++;
+			} else if (json_braced[j] == ']') {
+				bracket_depth--;
+				if (bracket_depth == 0) {
+					break;
+				}
+			}
+		}
+		if (bracket_depth != 0) {
+			break;
+		}
+		const std::string inner = json_braced.substr(bracket_open + 1, j - bracket_open - 1);
+		std::array<uint8_t, 4> rgba {{0, 0, 0, 255}};
+		size_t ci = 0;
+		size_t ii = 0;
+		while (ii < inner.size() && ci < 4u) {
+			while (ii < inner.size() && (is_ws(inner[ii]) || inner[ii] == ',')) {
+				ii++;
+			}
+			if (ii >= inner.size()) {
+				break;
+			}
+			char *end_parse = nullptr;
+			const double dv = std::strtod(inner.c_str() + ii, &end_parse);
+			if (end_parse == inner.c_str() + ii) {
+				break;
+			}
+			int iv = static_cast<int>(std::llround(dv));
+			if (iv < 0) {
+				iv = 0;
+			}
+			if (iv > 255) {
+				iv = 255;
+			}
+			rgba[ci++] = static_cast<uint8_t>(iv);
+			ii = static_cast<size_t>(end_parse - inner.c_str());
+		}
+		out[key] = rgba;
+		p = j + 1;
+	}
+}
+
 // Extract a JSON array of numbers: "key": [1.0, null, 0]
 // Returns values with a parallel has_value vector for null detection
 inline void extract_json_number_array(const std::string &json, const std::string &key,
@@ -867,6 +976,11 @@ inline void parse_bands_full(const std::string &json,
                     std::string nodata_str = extract_json_string(band_obj, "nodata");
                     info.nodata = parse_nodata_value(nodata_str);
                     info.has_nodata = true;
+                }
+                const std::string ct_obj = extract_json_object(band_obj, "colortable");
+                if (!ct_obj.empty()) {
+                    parse_colortable_from_object_string(ct_obj, info.colortable);
+                    info.has_colortable = !info.colortable.empty();
                 }
                 info.colorinterp = extract_json_string(band_obj, "colorinterp");
                 info.description = extract_json_string(band_obj, "description");

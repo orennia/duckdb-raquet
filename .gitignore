@@ -24,5 +24,6 @@ Thumbs.db
 # Test artifacts
 *.log
 duckdb_unittest_tempdir/
+.cache/
 # GDAL stats sidecars written next to test rasters
 *.aux.xml
