@@ -23,3 +23,5 @@ Thumbs.db
 # Test artifacts
 *.log
 duckdb_unittest_tempdir/
+.cache/clangd/compile_commands.json
+.cache/clangd/release/compile_commands.json
